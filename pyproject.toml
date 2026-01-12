@@ -1,0 +1,62 @@
+[project]
+name = "mineria-datos-itam"
+version = "2025.1.0"
+description = "ITAM Data Mining Course - Minería de Datos"
+authors = [
+    {name = "Saúl Caballero"}
+]
+readme = "README.md"
+requires-python = ">=3.13"
+license = {text = "MIT"}
+
+dependencies = [
+    # Core data science stack
+    "numpy>=2.3.2",
+    "pandas>=2.3.2",
+    "matplotlib>=3.10.5",
+    "seaborn>=0.13.2",
+
+    # Machine learning libraries
+    "scikit-learn>=1.6.0",
+    "xgboost>=2.1.0",
+    "lightgbm>=4.5.0",
+    "catboost>=1.2.7",
+
+    # Jupyter and notebook support
+    "jupyter>=1.1.1",
+    "jupyterlab>=4.3.0",
+    "ipykernel>=6.29.5",
+    "nbclient>=0.10.0",
+
+    # Utilities
+    "pyyaml>=6.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8.0",           # Linting and formatting
+    "nbqa>=1.9.1",           # Notebook quality assurance
+    "pre-commit>=4.0.1",     # Git hooks
+    "jupyter-cache>=1.0.0",  # Notebook execution caching
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

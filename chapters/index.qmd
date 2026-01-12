@@ -1,0 +1,32 @@
+# Temario {.unnumbered}
+
+1. Fundamentos y Proceso
+1.1 El Ecosistema de Datos
+1.2 Metodología CRISP-DM
+
+### Evaluación {.unnumbered}
+
+- Tareas (15%)
+- Quizes (25%)
+- Examen parcial (30%)
+- Proyecto final (30%):
+  - Entrega (75%)
+  - Exposición (25%)
+
+Existirá una parte extra a los alumnos que contribuyan al aprendizaje de sus compañeros:
+
+- Contribuciones al repositorio: añadiendo redacción más entendible, añadiendo ejemplos particulares a sus carreras, etc.
+- Actividad en el canal de Slack: contestando dudas de sus compañeros, iniciando discusiones para resolver problemas. 
+
+### Profesor
+
+**Nombre**: Saúl Caballero Ramírez
+
+**Correo**: saul.caballero.ramirez@gmail.com
+
+**Correo alternativo**: saul@nixtla.io
+
+### Referencias principales {.unnumbered}
+
+- [An Introduction to Statistical Learning](https://www.statlearning.com/), @ISL 
+- [The Elements of Statistical Learning](https://hastie.su.domains/ElemStatLearn/), @ESL 
