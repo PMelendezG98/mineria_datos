@@ -1,5 +1,7 @@
 # Árboles de Decisión
 
+[Quiz](https://forms.gle/uXDF4ioX8VcPaLeV6)
+
 ## Introducción
 
 Los **árboles de decisión** son uno de los métodos más intuitivos y ampliamente utilizados en el aprendizaje supervisado. A diferencia de los métodos lineales como la regresión logística, los árboles pueden capturar relaciones no lineales complejas e interacciones entre variables de forma natural, produciendo modelos que son fáciles de interpretar y visualizar.
@@ -665,90 +667,180 @@ print(f"  Accuracy prueba: {test_scores[best_idx]:.3f}")
 
 ### Importancia de Variables
 
-Una de las grandes ventajas de los árboles es que podemos medir la **importancia** de cada variable basándonos en cuánto reduce la impureza:
+Antes de ver la fórmula, construyamos la intuición:
+
+> Imagina que el árbol es un equipo de trabajo. Las variables que hacen preguntas **cerca de la raíz** son las que más contribuyen, porque sus decisiones afectan a *todas* las observaciones. Las que aparecen en los niveles más bajos solo afectan a subconjuntos pequeños. La importancia mide exactamente esto: cuánta reducción de impureza acumuló cada variable, ponderada por el tamaño de los grupos que dividió.
+
+Formalmente, la importancia de la variable $X_j$ es:
 
 $$\text{Importancia}(X_j) = \sum_{t: \text{usa } X_j} \frac{n_t}{n} \cdot \Delta I(t)$$
 
 Donde:
+
 - $n_t$ es el número de muestras en el nodo $t$
 - $n$ es el número total de muestras
 - $\Delta I(t)$ es la reducción en impureza por la división en el nodo $t$
 
+Las importancias están normalizadas para que sumen 1, por lo que una variable con importancia 0.40 explica el 40% de la reducción total de impureza en el árbol.
+
+::: {.callout-note}
+## Limitación: sesgo hacia variables de alta cardinalidad
+
+La importancia por reducción de impureza (MDI) tiende a **sobrestimar** variables con muchos valores únicos o variables continuas, porque ofrecen más puntos de corte posibles. Esto puede inflar artificialmente su importancia frente a variables categóricas con pocos niveles.
+:::
+
 ```{python}
 #| label: feature-importance
-#| fig-cap: "Importancia de variables en árbol de decisión"
-#| fig-width: 12
+#| fig-cap: "Importancia MDI en un ejemplo ilustrativo de clasificación de clientes"
+#| fig-width: 11
 #| fig-height: 5
 #| echo: true
 
-# Entrenar árbol en dataset con más características
 from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
 
-# Generar datos con 10 características
-X_multi, y_multi = make_classification(
-    n_samples=500,
-    n_features=10,
-    n_informative=6,
-    n_redundant=2,
-    n_repeated=0,
+# Ejemplo ilustrativo: clasificar si un cliente comprará o no
+# Variables con nombres interpretables para facilitar la lectura
+feat_names = ['ingreso', 'edad', 'historial_credito', 'deuda_actual', 'region']
+
+np.random.seed(42)
+X_ej, y_ej = make_classification(
+    n_samples=600, n_features=5,
+    n_informative=3, n_redundant=1, n_repeated=0,
     random_state=42
 )
 
-# Nombres de características
-feature_names = [f'X{i+1}' for i in range(10)]
+X_tr, X_te, y_tr, y_te = train_test_split(X_ej, y_ej, test_size=0.3, random_state=42)
 
-# Entrenar árbol
-tree_multi = DecisionTreeClassifier(max_depth=5, random_state=42)
-tree_multi.fit(X_multi, y_multi)
+tree_ej = DecisionTreeClassifier(max_depth=4, random_state=42)
+tree_ej.fit(X_tr, y_tr)
 
-# Obtener importancias
-importances = tree_multi.feature_importances_
-indices = np.argsort(importances)[::-1]
+importances = tree_ej.feature_importances_
+idx_ord = np.argsort(importances)[::-1]
+n_feat = len(feat_names)
 
-# Visualización
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-# Panel 1: Gráfico de barras
-axes[0].barh(range(10), importances[indices], color='steelblue', alpha=0.7)
-axes[0].set_yticks(range(10))
-axes[0].set_yticklabels([feature_names[i] for i in indices])
-axes[0].set_xlabel('Importancia', fontsize=11)
-axes[0].set_title('Importancia de Variables (Reducción de Impureza)', fontsize=12)
+# Panel 1: Barras de importancia MDI
+axes[0].barh(range(n_feat), importances[idx_ord], color='steelblue', alpha=0.8)
+axes[0].set_yticks(range(n_feat))
+axes[0].set_yticklabels([feat_names[i] for i in idx_ord], fontsize=10)
+axes[0].set_xlabel('Importancia MDI (fracción de impureza reducida)', fontsize=10)
+axes[0].set_title('Importancia de Variables\n(Reducción de Impureza — MDI)', fontsize=11)
 axes[0].grid(True, alpha=0.3, axis='x')
-
-# Añadir valores
-for i, (idx, imp) in enumerate(zip(indices, importances[indices])):
+for i, imp in enumerate(importances[idx_ord]):
     axes[0].text(imp + 0.005, i, f'{imp:.3f}', va='center', fontsize=9)
 
-# Panel 2: Importancia acumulada
-cumsum_importance = np.cumsum(importances[indices])
-axes[1].plot(range(1, 11), cumsum_importance, marker='o', linewidth=2.5,
+# Panel 2: Curva de importancia acumulada
+cum_imp = np.cumsum(importances[idx_ord])
+axes[1].plot(range(1, n_feat + 1), cum_imp, marker='o', linewidth=2.5,
              markersize=8, color='darkgreen')
-axes[1].fill_between(range(1, 11), cumsum_importance, alpha=0.3, color='green')
-axes[1].axhline(y=0.8, color='red', linestyle='--', linewidth=1.5,
-                label='80% de importancia')
-axes[1].axhline(y=0.95, color='orange', linestyle='--', linewidth=1.5,
-                label='95% de importancia')
-axes[1].set_xlabel('Número de Variables', fontsize=11)
-axes[1].set_ylabel('Importancia Acumulada', fontsize=11)
-axes[1].set_title('Importancia Acumulada de Variables', fontsize=12)
-axes[1].set_xticks(range(1, 11))
+axes[1].fill_between(range(1, n_feat + 1), cum_imp, alpha=0.2, color='green')
+axes[1].axhline(y=0.8,  color='red',    linestyle='--', linewidth=1.5, label='80% acumulado')
+axes[1].axhline(y=0.95, color='orange', linestyle='--', linewidth=1.5, label='95% acumulado')
+axes[1].set_xlabel('Número de variables (orden descendente de importancia)', fontsize=10)
+axes[1].set_ylabel('Importancia acumulada', fontsize=10)
+axes[1].set_title('¿Cuántas variables\nexplican el 80 / 95%?', fontsize=11)
+axes[1].set_xticks(range(1, n_feat + 1))
 axes[1].legend()
 axes[1].grid(True, alpha=0.3)
 
 plt.tight_layout()
 plt.show()
-
-# Imprimir tabla de importancias
-print("\nTabla de Importancias:")
-print("=" * 60)
-print(f"{'Variable':<12} {'Importancia':<15} {'Importancia Acum.':<20}")
-print("-" * 60)
-cumsum = 0
-for idx in indices:
-    cumsum += importances[idx]
-    print(f"{feature_names[idx]:<12} {importances[idx]:<15.4f} {cumsum:<20.4f}")
 ```
+
+En este ejemplo, `ingreso` e `historial_credito` aparecen al tope porque el árbol las usó en los nodos más altos, donde cada división afecta a cientos de observaciones. `region`, en cambio, solo aparece en ramas profundas y acumula poca importancia.
+
+### Permutation Importance: una alternativa más robusta
+
+La importancia MDI se calcula **durante el entrenamiento** a partir de los nodos del árbol. Tiene una limitación importante: no mide directamente qué tan útil es la variable para **generalizar a datos nuevos**.
+
+La *permutation importance* toma un camino diferente:
+
+> Toma el modelo ya entrenado y evalúalo en el conjunto de prueba. Luego **baraja aleatoriamente** los valores de una variable y vuelve a evaluar. Si el desempeño cae mucho, esa variable era crítica. Si apenas cambia, el modelo no la necesitaba para generalizar.
+
+Este enfoque es más costoso (requiere re-evaluar $k$ veces por variable) pero responde una pregunta más útil en la práctica.
+
+```{python}
+#| label: permutation-importance
+#| fig-cap: "Comparación entre importancia MDI y permutation importance"
+#| fig-width: 12
+#| fig-height: 5
+#| echo: true
+
+from sklearn.inspection import permutation_importance
+
+perm_res  = permutation_importance(tree_ej, X_te, y_te, n_repeats=30, random_state=42)
+perm_mean = perm_res.importances_mean
+perm_std  = perm_res.importances_std
+perm_ord  = np.argsort(perm_mean)[::-1]
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# MDI
+axes[0].barh(range(n_feat), importances[idx_ord], color='steelblue', alpha=0.8)
+axes[0].set_yticks(range(n_feat))
+axes[0].set_yticklabels([feat_names[i] for i in idx_ord], fontsize=10)
+axes[0].set_xlabel('Importancia MDI', fontsize=10)
+axes[0].set_title('MDI\n(calculada en entrenamiento)', fontsize=11)
+axes[0].grid(True, alpha=0.3, axis='x')
+
+# Permutation importance con barras de error (incertidumbre entre repeticiones)
+axes[1].barh(range(n_feat), perm_mean[perm_ord],
+             xerr=perm_std[perm_ord],
+             color='tomato', alpha=0.8, capsize=4)
+axes[1].set_yticks(range(n_feat))
+axes[1].set_yticklabels([feat_names[i] for i in perm_ord], fontsize=10)
+axes[1].set_xlabel('Caída en accuracy al permutar', fontsize=10)
+axes[1].set_title('Permutation Importance\n(calculada en test)', fontsize=11)
+axes[1].axvline(x=0, color='black', linewidth=0.8)
+axes[1].grid(True, alpha=0.3, axis='x')
+
+plt.suptitle('MDI vs. Permutation Importance', fontsize=12)
+plt.tight_layout()
+plt.show()
+
+# Cambios de ranking entre ambas métricas
+print("Cambios de ranking entre MDI y Permutation Importance:")
+print("-" * 50)
+mdi_rk  = {feat_names[idx_ord[i]]: i + 1 for i in range(n_feat)}
+perm_rk = {feat_names[perm_ord[i]]: i + 1 for i in range(n_feat)}
+for feat in feat_names:
+    delta = abs(mdi_rk[feat] - perm_rk[feat])
+    signo = "  <-- discrepancia" if delta >= 2 else ""
+    print(f"  {feat:<20}  MDI: #{mdi_rk[feat]}  |  Perm: #{perm_rk[feat]}{signo}")
+```
+
+Las barras de error en la permutation importance reflejan la variabilidad entre las 30 repeticiones de la permutación. Una barra larga indica que la importancia de esa variable es **inestable** — señal de posible correlación con otra variable.
+
+::: {.callout-tip}
+## ¿Cuándo usar cada métrica?
+
+| Métrica | Ventaja | Limitación |
+|---|---|---|
+| **MDI** | Rápida, no requiere datos de test | Sesgada hacia variables de alta cardinalidad |
+| **Permutation** | Mide capacidad de generalización | Subestima variables correlacionadas entre sí |
+
+Si ambas coinciden en el ranking, el resultado es confiable. Si difieren notablemente, la causa más común es **multicolinealidad** entre variables.
+:::
+
+::: {.callout-warning}
+## Multicolinealidad: la importancia se fragmenta
+
+Cuando dos variables contienen información redundante (están correlacionadas), el árbol puede usar cualquiera de las dos de forma casi intercambiable. Consecuencia: la importancia se **reparte** entre ambas y ambas parecen menos relevantes de lo que son en realidad.
+
+Esto afecta especialmente a la Permutation Importance: si `X_a` y `X_b` son casi idénticas, barajar `X_a` no daña al modelo porque `X_b` sigue aportando la misma información.
+
+Antes de interpretar importancias, vale la pena revisar la matriz de correlación entre variables.
+:::
+
+::: {.callout-note}
+## Análisis profundo: dataset de cáncer de seno
+
+Los conceptos anteriores — MDI, permutation importance, multicolinealidad — cobran más sentido con un caso de uso real donde las variables tienen significado concreto y las decisiones tienen consecuencias interpretables.
+
+En el notebook [`notebooks/arboles_cancer_seno.ipynb`](../notebooks/arboles_cancer_seno.ipynb) se aplica todo lo visto en este capítulo al dataset de diagnóstico de cáncer de seno de Wisconsin: desde el EDA hasta la comparación de métricas de importancia, pasando por la interpretación clínica de qué características del tumor son más relevantes para distinguir tumores benignos de malignos.
+:::
 
 ### Extracción de Reglas
 
@@ -907,64 +999,70 @@ def plot_comparison(X, y, model1, model2, name1, name2):
 fig = plot_comparison(X_linear, y_linear, tree_model, logistic_model,
                       'Árbol de Decisión', 'Regresión Logística')
 plt.show()
-
-print("Observaciones:")
-print("=" * 60)
-print("- Regresión logística captura mejor la relación lineal subyacente")
-print("- Árbol de decisión crea fronteras rectangulares que aproximan la línea")
-print("- Para relaciones lineales, la regresión logística es más eficiente")
-print("- Para relaciones no lineales, los árboles son más flexibles")
 ```
 
-## Aplicación Práctica: Dataset Real
+::: {.callout-note}
+## Observaciones:
+
+- Regresión logística captura mejor la relación lineal subyacente
+- Árbol de decisión crea fronteras rectangulares que aproximan la línea
+- Para relaciones lineales, la regresión logística es más eficiente
+- Para relaciones no lineales, los árboles son más flexibles
+:::
+
+## Optimización de Hiperparámetros con Optuna
+
+Hasta ahora hemos elegido los hiperparámetros del árbol (como `max_depth` o `min_samples_leaf`) de forma manual o por intuición. Pero, ¿cómo saber cuál combinación es realmente la mejor? Necesitamos un proceso sistemático.
+
+### El problema: el espacio de búsqueda crece exponencialmente
+
+Un árbol de decisión tiene varios hiperparámetros que interactúan entre sí. Si intentamos probar todas las combinaciones posibles, el número de experimentos se dispara rápidamente:
+
+| Hiperparámetro | Valores a probar | Opciones |
+|---|---|:---:|
+| `criterion` | gini, entropy | 2 |
+| `max_depth` | 1, 2, 3, …, 15 | 15 |
+| `min_samples_split` | 2, 5, 10, 20, 50 | 5 |
+| `min_samples_leaf` | 1, 2, 5, 10 | 4 |
+| `max_features` | sqrt, log2, None | 3 |
+
+**Total de combinaciones:** $2 \times 15 \times 5 \times 4 \times 3 = \mathbf{1{,}800}$ experimentos.
+
+Si cada experimento tarda 1 segundo, son 30 minutos solo para un árbol simple. Para modelos más complejos explorar todo el espacio se vuelve inviable.
+
+### Grid Search: la búsqueda exhaustiva
+
+El enfoque tradicional es el **Grid Search**: definir una cuadrícula de valores y probar todas las combinaciones. Es garantizado pero ciego — prueba combinaciones malas con la misma dedicación que las buenas.
 
 ```{python}
-#| label: real-dataset-application
+#| label: grid-search-baseline
 #| echo: true
 
-from sklearn.datasets import load_breast_cancer
-from sklearn.model_selection import cross_val_score, GridSearchCV
-import pandas as pd
+from sklearn.model_selection import GridSearchCV, cross_val_score
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
 
-# Cargar dataset
-cancer = load_breast_cancer()
-X_cancer = cancer.data
-y_cancer = cancer.target
-
-print("DATASET: Wisconsin Breast Cancer")
-print("=" * 60)
-print(f"Número de muestras: {X_cancer.shape[0]}")
-print(f"Número de características: {X_cancer.shape[1]}")
-print(f"Clases: {cancer.target_names}")
-print(f"Distribución: {np.bincount(y_cancer)}")
-
-# Dividir datos
-X_train_c, X_test_c, y_train_c, y_test_c = train_test_split(
-    X_cancer, y_cancer, test_size=0.3, random_state=42, stratify=y_cancer
-)
-
-# 1. Árbol sin regularización
-tree_unreg = DecisionTreeClassifier(random_state=42)
-tree_unreg.fit(X_train_c, y_train_c)
-
-print("\n1. ÁRBOL SIN REGULARIZACIÓN")
-print("-" * 60)
-print(f"Profundidad: {tree_unreg.get_depth()}")
-print(f"Número de hojas: {tree_unreg.get_n_leaves()}")
-print(f"Accuracy entrenamiento: {tree_unreg.score(X_train_c, y_train_c):.3f}")
-print(f"Accuracy prueba: {tree_unreg.score(X_test_c, y_test_c):.3f}")
-
-# 2. Búsqueda de hiperparámetros óptimos
+# Grid pequeño para ilustrar el costo
 param_grid = {
-    'max_depth': [3, 5, 7, 10, None],
-    'min_samples_split': [2, 5, 10, 20],
-    'min_samples_leaf': [1, 2, 5, 10],
-    'criterion': ['gini', 'entropy']
+    'max_depth': [2, 4, 6, 8, 10],
+    'min_samples_split': [2, 10, 20],
+    'min_samples_leaf': [1, 5, 10],
+    'criterion': ['gini', 'entropy'],
 }
 
-print("\n2. BÚSQUEDA DE HIPERPARÁMETROS (Grid Search)")
-print("-" * 60)
-print("Evaluando combinaciones de hiperparámetros con CV...")
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.datasets import make_classification
+
+np.random.seed(42)
+X, y = make_classification(
+    n_samples=500, n_features=10, n_informative=5,
+    n_redundant=2, random_state=42
+)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
 
 grid_search = GridSearchCV(
     DecisionTreeClassifier(random_state=42),
@@ -973,52 +1071,203 @@ grid_search = GridSearchCV(
     scoring='accuracy',
     n_jobs=-1
 )
-grid_search.fit(X_train_c, y_train_c)
+grid_search.fit(X_train, y_train)
 
-print(f"Mejor combinación de parámetros:")
-for param, value in grid_search.best_params_.items():
-    print(f"  {param}: {value}")
+print(f"Combinaciones evaluadas: {len(grid_search.cv_results_['mean_test_score'])}")
+print(f"Mejor score CV:          {grid_search.best_score_:.4f}")
+print(f"Score en test:           {grid_search.score(X_test, y_test):.4f}")
+print(f"\nMejores hiperparámetros:")
+for k, v in grid_search.best_params_.items():
+    print(f"  {k}: {v}")
+```
 
-# 3. Evaluar mejor modelo
-best_tree = grid_search.best_estimator_
+Con solo 5 valores por hiperparámetro ya evaluamos 90 combinaciones. El problema real es que Grid Search **no aprende**: si las primeras 10 pruebas muestran que `max_depth > 8` siempre da resultados malos, el Grid Search sigue probando esos valores igual. Optuna no.
 
-print("\n3. MEJOR ÁRBOL (después de optimización)")
-print("-" * 60)
-print(f"Profundidad: {best_tree.get_depth()}")
-print(f"Número de hojas: {best_tree.get_n_leaves()}")
-print(f"Accuracy entrenamiento: {best_tree.score(X_train_c, y_train_c):.3f}")
-print(f"Accuracy prueba: {best_tree.score(X_test_c, y_test_c):.3f}")
+### Optuna: búsqueda inteligente
 
-# 4. Validación cruzada
-cv_scores = cross_val_score(best_tree, X_train_c, y_train_c, cv=5)
-print(f"\nValidación cruzada (5-fold):")
-print(f"  Scores: {cv_scores}")
-print(f"  Media: {cv_scores.mean():.3f} (+/- {cv_scores.std():.3f})")
+**Optuna** es una librería de optimización de hiperparámetros que aprende de los intentos anteriores para decidir qué combinación probar a continuación. En lugar de una cuadrícula fija, usa un algoritmo llamado **TPE (Tree-structured Parzen Estimator)** que modela qué regiones del espacio de búsqueda son prometedoras. La idea central: después de cada trial, Optuna actualiza su modelo interno de "qué funciona" y propone el siguiente trial en zonas del espacio que parecen más prometedoras. Esto se llama **optimización bayesiana**.
+
+### Cómo funciona TPE
+
+TPE (Tree-structured Parzen Estimator) es el algoritmo que Optuna usa por defecto para decidir qué hiperparámetros probar a continuación. El nombre suena intimidante, pero la idea es sorprendentemente intuitiva.
+
+**La pregunta que TPE responde en cada paso:**
+
+> "¿En qué parte del espacio de hiperparámetros han vivido los buenos resultados, y en qué parte los malos?"
+
+#### Paso 1: los primeros trials son aleatorios
+
+Al principio no hay información, así que Optuna muestrea aleatoriamente. Estos primeros trials son la "exploración inicial" — sirven para mapear el territorio.
+
+```
+Trial  1: max_depth=12, min_samples_leaf=3  → accuracy = 0.81
+Trial  2: max_depth=2,  min_samples_leaf=15 → accuracy = 0.74
+Trial  3: max_depth=7,  min_samples_leaf=1  → accuracy = 0.83
+Trial  4: max_depth=18, min_samples_leaf=8  → accuracy = 0.77
+Trial  5: max_depth=5,  min_samples_leaf=4  → accuracy = 0.86
+...
+```
+
+#### Paso 2: dividir en "buenos" y "malos"
+
+Después de acumular suficientes trials, TPE los divide en dos grupos usando un umbral $\gamma$ (típicamente el top 25%):
+
+- **$l(x)$** — distribución de los hiperparámetros donde el score fue **bueno** (top 25%)
+- **$g(x)$** — distribución de los hiperparámetros donde el score fue **malo** (el resto)
+
+Siguiendo el ejemplo: si $\gamma = 0.25$ y tenemos 5 trials, el "bueno" es el Trial 5 (accuracy = 0.86) y los "malos" son los otros cuatro.
+
+TPE ajusta una distribución de probabilidad sobre cada grupo. Para variables continuas usa una mezcla de distribuciones gaussianas (Parzen window); para variables categóricas usa distribuciones discretas — de ahí el "Parzen Estimator" en el nombre.
+
+#### Paso 3: proponer el siguiente punto
+
+Para el siguiente trial, TPE busca el punto $x^*$ que **maximiza la razón**:
+
+$$x^* = \arg\max_x \frac{l(x)}{g(x)}$$
+
+Esto es elegante: queremos valores de hiperparámetros que sean **muy probables bajo los buenos resultados** y **poco probables bajo los malos**. Un $x$ con $l(x)/g(x)$ alto es prometedor porque vive en la zona de los ganadores y lejos de la zona de los perdedores.
+
+#### La intuición completa en una imagen mental
+
+Imagina que estás buscando petróleo en un mapa. Después de perforar en varios lugares:
+
+- Marcas en **verde** los pozos que dieron petróleo (los buenos)
+- Marcas en **rojo** los que no dieron nada (los malos)
+
+Grid Search perforaría en una cuadrícula fija, ignorando tus resultados previos. TPE, en cambio, mira el mapa y dice: *"los pozos buenos se concentran en el noroeste, los malos en el sureste — el próximo pozo va al noroeste, pero un poco más al norte de lo que ya probé"*.
+
+Con cada nuevo trial, el mapa se actualiza y la búsqueda se vuelve más precisa.
+
+::: {.callout-note}
+## ¿Por qué "Tree-structured"?
+
+El "Tree-structured" no se refiere a árboles de decisión. Se refiere a que cuando hay múltiples hiperparámetros, TPE los modela con una estructura de árbol de dependencias: algunos hiperparámetros solo son relevantes cuando otro toma cierto valor (por ejemplo, `min_impurity_decrease` solo importa si el árbol tiene cierta profundidad). TPE respeta estas dependencias condicionales.
+:::
+
+## Implementación
+
+Los tres conceptos clave:
+
+| Concepto | Significado |
+|---|---|
+| **Study** | El experimento completo — el proceso de optimización |
+| **Trial** | Un intento individual — una combinación de hiperparámetros |
+| **Objective** | La función que queremos maximizar (o minimizar) |
+
+```{python}
+#| label: optuna-intro
+#| echo: true
+
+import optuna
+optuna.logging.set_verbosity(optuna.logging.WARNING)  # suprimir logs intermedios
+
+from sklearn.model_selection import cross_val_score
+
+def objective(trial):
+    """
+    Esta función define UN trial: Optuna elige los hiperparámetros,
+    nosotros entrenamos el modelo y regresamos el score a optimizar.
+    """
+    # Optuna sugiere valores dentro de los rangos que le indicamos
+    params = {
+        'criterion': trial.suggest_categorical('criterion', ['gini', 'entropy']),
+        'max_depth': trial.suggest_int('max_depth', 1, 20),
+        'min_samples_split': trial.suggest_int('min_samples_split', 2, 50),
+        'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 20),
+        'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None]),
+        'ccp_alpha': trial.suggest_float('ccp_alpha', 0.0, 0.05),
+    }
+
+    model = DecisionTreeClassifier(random_state=42, **params)
+
+    # Usamos cross-validation para una estimación robusta del desempeño
+    scores = cross_val_score(model, X_train, y_train, cv=5, scoring='accuracy')
+    return scores.mean()
+
+
+# Crear el estudio y optimizar
+study = optuna.create_study(direction='maximize')  # queremos maximizar accuracy
+study.optimize(objective, n_trials=100)
+
+print(f"Trials completados:  {len(study.trials)}")
+print(f"Mejor score CV:      {study.best_value:.4f}")
+print(f"\nMejores hiperparámetros encontrados:")
+for k, v in study.best_params.items():
+    print(f"  {k}: {v}")
 ```
 
 ```{python}
-#| label: cancer-feature-importance
-#| fig-cap: "Top 10 características más importantes para clasificar cáncer de mama"
-#| fig-width: 10
-#| fig-height: 6
+#| label: optuna-results
+#| fig-cap: "Evolución del score a lo largo de los trials de Optuna"
+#| fig-width: 12
+#| fig-height: 5
 #| echo: true
 
-# Importancia de características
-importances_cancer = best_tree.feature_importances_
-indices_cancer = np.argsort(importances_cancer)[::-1][:10]  # Top 10
+import matplotlib.pyplot as plt
 
-plt.figure(figsize=(10, 6))
-plt.barh(range(10), importances_cancer[indices_cancer], color='coral', alpha=0.7)
-plt.yticks(range(10), [cancer.feature_names[i] for i in indices_cancer])
-plt.xlabel('Importancia (Reducción de Impureza)', fontsize=12)
-plt.title('Top 10 Características Más Importantes', fontsize=13)
-plt.gca().invert_yaxis()
-plt.grid(True, alpha=0.3, axis='x')
+# Extraer historial de trials
+trial_values = [t.value for t in study.trials]
+best_so_far = np.maximum.accumulate(trial_values)
 
-# Añadir valores
-for i, imp in enumerate(importances_cancer[indices_cancer]):
-    plt.text(imp + 0.005, i, f'{imp:.3f}', va='center', fontsize=10)
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# Panel 1: score por trial + mejor acumulado
+axes[0].scatter(range(len(trial_values)), trial_values,
+                alpha=0.4, s=20, color='steelblue', label='Score del trial')
+axes[0].plot(range(len(best_so_far)), best_so_far,
+             color='red', linewidth=2, label='Mejor hasta ahora')
+axes[0].axhline(y=grid_search.best_score_, color='green', linestyle='--',
+                linewidth=1.5, label=f'Grid Search ({grid_search.best_score_:.4f})')
+axes[0].set_xlabel('Número de trial', fontsize=11)
+axes[0].set_ylabel('Accuracy (CV 5-fold)', fontsize=11)
+axes[0].set_title('Optuna: evolución de la búsqueda', fontsize=12)
+axes[0].legend(fontsize=9)
+axes[0].grid(True, alpha=0.3)
+
+# Panel 2: importancia de hiperparámetros según Optuna
+importances = optuna.importance.get_param_importances(study)
+param_names = list(importances.keys())
+param_vals = list(importances.values())
+
+axes[1].barh(param_names, param_vals, color='steelblue', alpha=0.8)
+axes[1].set_xlabel('Importancia relativa', fontsize=11)
+axes[1].set_title('¿Qué hiperparámetro importa más?', fontsize=12)
+axes[1].grid(True, alpha=0.3, axis='x')
 
 plt.tight_layout()
 plt.show()
 ```
+
+```{python}
+#| label: optuna-comparison
+#| echo: true
+
+# Evaluar el mejor modelo de Optuna en test
+best_model = DecisionTreeClassifier(random_state=42, **study.best_params)
+best_model.fit(X_train, y_train)
+optuna_test_score = best_model.score(X_test, y_test)
+
+print("=" * 55)
+print(f"{'Método':<25} {'CV Score':>10} {'Test Score':>12}")
+print("-" * 55)
+print(f"{'Sin optimizar (default)':<25} {cross_val_score(DecisionTreeClassifier(random_state=42), X_train, y_train, cv=5).mean():>10.4f} {DecisionTreeClassifier(random_state=42).fit(X_train, y_train).score(X_test, y_test):>12.4f}")
+print(f"{'Grid Search':<25} {grid_search.best_score_:>10.4f} {grid_search.score(X_test, y_test):>12.4f}")
+print(f"{'Optuna (100 trials)':<25} {study.best_value:>10.4f} {optuna_test_score:>12.4f}")
+print("=" * 55)
+```
+
+### Interpretando los resultados
+
+La gráfica de **importancia de hiperparámetros** (panel derecho) revela algo valioso: no todos los hiperparámetros importan igual. En los árboles, `max_depth` y `min_samples_leaf` suelen dominar porque controlan directamente la complejidad del modelo. `criterion` (gini vs entropy) rara vez hace diferencia notable.
+
+Este diagnóstico es útil para todos los modelos que veremos después: cuando llegues a XGBoost con decenas de hiperparámetros, Optuna te dirá en cuáles vale la pena concentrarte.
+
+::: {.callout-tip}
+## Reglas prácticas para usar Optuna
+
+1. **Empieza con rangos amplios** — deja que Optuna explore; puedes afinar después
+2. **Usa `cross_val_score` en la objective**, no train/test directo — evita sobreajustar al conjunto de validación
+3. **50-200 trials** suelen ser suficientes para modelos simples; para XGBoost o redes neuronales considera más
+4. **Lee la importancia de hiperparámetros** antes de hacer una segunda ronda de búsqueda más fina
+5. **`direction='maximize'`** para métricas como accuracy, AUC, F1; **`direction='minimize'`** para errores como MSE
+:::
