@@ -1,0 +1,1561 @@
+---
+format:
+  html:
+    code-fold: true
+execute:
+  warning: false
+---
+
+# Métodos de Boosting {#sec-boosting}
+
+```{python}
+#| include: false
+import warnings
+warnings.filterwarnings('ignore')
+```
+
+## Motivación: aprender de los errores
+
+En el capítulo anterior vimos que Random Forest construye cientos de árboles **en paralelo e independientemente** y promedia sus predicciones para reducir la varianza. Es una estrategia poderosa y robusta. Pero tiene un límite conceptual: si cada árbol individual comete los mismos tipos de errores, promediar no los corrige. La media de cien modelos sesgados sigue siendo un modelo sesgado.
+
+¿Qué haríamos de manera diferente? Pensemos en cómo aprende un estudiante:
+
+- **Estrategia bagging**: resuelve el mismo banco de ejercicios 100 veces con variantes aleatorias. Gana estabilidad, pero si tiene un error conceptual en álgebra, lo repetirá en todas las rondas.
+- **Estrategia boosting**: después de cada ronda, *identifica* los ejercicios donde falló y les dedica más atención en la siguiente. Iteración a iteración, sus puntos débiles se convierten en fortalezas.
+
+Los **métodos de boosting** implementan exactamente esta segunda estrategia. Construyen una secuencia de modelos donde cada uno se enfoca específicamente en los errores del modelo acumulado hasta ese momento. El resultado es un proceso de **aprendizaje adaptativo** que puede transformar una colección de aprendices débiles en un predictor de alta precisión.
+
+Esta idea, introducida en los años 90 con AdaBoost, dio origen a los algoritmos más exitosos del machine learning moderno para datos tabulares: **XGBoost**, **LightGBM** y **CatBoost** dominan las competencias de Kaggle desde hace más de una década y son herramientas estándar en la industria.
+
+## El concepto central del boosting
+
+### Aprendices débiles y aprendices fuertes
+
+Un **aprendiz débil** (*weak learner*) es un modelo que predice apenas mejor que el azar. En clasificación binaria, un modelo que acierta el 51% ya califica. En la práctica, los **decision stumps** —árboles de decisión de profundidad 1— son los aprendices débiles más usados en boosting: son extremadamente simples, rápidos de entrenar, y capturan exactamente una interacción binaria en los datos.
+
+::: {.callout-note}
+## ¿Por qué empezar con modelos débiles?
+
+Parece contradictorio, pero la teoría lo garantiza: si cada aprendiz débil es *al menos ligeramente* mejor que el azar, combinar suficientes de ellos de la forma correcta produce un modelo arbitrariamente preciso. Usar aprendices simples también controla la varianza del modelo final, compensando el incremento de sesgo que ocurriría si usáramos árboles profundos.
+:::
+
+El modelo final del boosting es una **combinación ponderada** de estos aprendices:
+
+$$F(x) = \sum_{m=1}^{M} \alpha_m \, h_m(x)$$
+
+donde $h_m(x)$ es el $m$-ésimo aprendiz débil y $\alpha_m$ su peso asignado según su utilidad. La diferencia con bagging es que esta suma **no es paralela**: cada $h_m$ se entrena después de evaluar el error de $F_{m-1}(x)$.
+
+### El ciclo del error: cómo aprende cada modelo
+
+La mecánica central del boosting se puede descomponer en cuatro pasos que se repiten iteración tras iteración:
+
+1. **Calcular el error actual.** Dado el modelo acumulado hasta el momento $F_{m-1}(x)$, se calcula cuánto se equivoca en cada ejemplo:
+   $$r_i = y_i - F_{m-1}(x_i)$$
+   Estos **residuales** representan la señal que el modelo aún no ha capturado.
+
+2. **Entrenar un aprendiz débil sobre el error, no sobre los datos originales.** El siguiente modelo $h_m$ se ajusta para predecir $r_i$, no $y_i$. Su tarea no es aprender la relación completa entrada-salida, sino únicamente corregir lo que el modelo anterior dejó pendiente.
+
+3. **Sumar la corrección al modelo acumulado:**
+   $$F_m(x) = F_{m-1}(x) + \nu \cdot h_m(x)$$
+   donde $\nu \in (0, 1]$ es el *learning rate* que controla cuánto confiamos en cada corrección.
+
+4. **Repetir** hasta completar $M$ iteraciones o hasta que el error sea suficientemente pequeño.
+
+::: {.callout-note}
+## La intuición detrás del ciclo
+
+Cada aprendiz débil nunca ve el problema completo: solo ve el residuo que dejó su predecesor. Un árbol de profundidad 1 (decision stump) es suficiente porque su única responsabilidad es aproximar una fracción del error restante, no toda la función. La complejidad emerge de sumar muchas correcciones pequeñas, no de que cada corrector sea intrínsecamente poderoso.
+
+Esto también explica la importancia del *learning rate*: si $\nu = 1$ tomamos cada corrección al pie de la letra y convergemos rápido pero arriesgamos sobreajuste; si $\nu$ es pequeño, cada paso es conservador y necesitamos más iteraciones, pero el modelo final generaliza mejor.
+:::
+
+Esta mecánica es el denominador común de todos los algoritmos de boosting. AdaBoost la implementa a través de pesos sobre los ejemplos; Gradient Boosting la formaliza como descenso por gradiente sobre el espacio de funciones. Ambos, no obstante, comparten el mismo principio: **cada modelo simple aprende del error que dejó el anterior**.
+
+![Diagrama del proceso de boosting: cada subconjunto alimenta a un aprendiz débil, cuyas predicciones falsas pasan al siguiente subset para ser corregidas, hasta producir una predicción global.](imgs/boosting_process.png){#fig-boosting-proceso fig-align="center" width="80%"}
+
+### Intuición visual: boosting en acción
+
+Veamos el proceso en un problema de regresión 1D. Tenemos datos con una relación no lineal y observamos cómo boosting construye progresivamente una función más y más precisa.
+
+```{python}
+#| label: fig-boosting-intuicion
+#| fig-cap: "Proceso de boosting en regresión 1D. Un único árbol superficial (aprendiz débil) produce una aproximación burda en forma de escalera. Al combinar 5, 20 y 100 árboles secuencialmente —cada uno corrigiendo los errores del anterior— el modelo converge hacia la función verdadera. El MSE sobre el conjunto de entrenamiento cae dramáticamente con cada iteración."
+#| fig-width: 12
+#| fig-height: 8
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.tree import DecisionTreeRegressor
+
+np.random.seed(42)
+
+def funcion_verdadera(x):
+    return np.sin(2 * x) + 0.5 * np.cos(x) + 0.1 * x
+
+n = 150
+X_train = np.random.uniform(-3, 3, n)
+y_train = funcion_verdadera(X_train) + np.random.normal(0, 0.2, n)
+X_plot = np.linspace(-3, 3, 300).reshape(-1, 1)
+y_true = funcion_verdadera(X_plot.ravel())
+
+# Modelos con distinto número de iteraciones
+single_tree = DecisionTreeRegressor(max_depth=2, random_state=42)
+single_tree.fit(X_train.reshape(-1, 1), y_train)
+
+configs = [(5, 'blue', '(b) 5 árboles'), (20, 'green', '(c) 20 árboles'), (100, 'purple', '(d) 100 árboles')]
+modelos = {}
+for n_est, color, title in configs:
+    m = GradientBoostingRegressor(n_estimators=n_est, max_depth=2, learning_rate=0.3, random_state=42)
+    m.fit(X_train.reshape(-1, 1), y_train)
+    modelos[n_est] = (m, color, title)
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+def plot_panel(ax, model, title, color):
+    y_pred = model.predict(X_plot)
+    mse = np.mean((y_train - model.predict(X_train.reshape(-1, 1)))**2)
+    ax.scatter(X_train, y_train, alpha=0.4, s=25, c='gray', edgecolors='none', label='Datos')
+    ax.plot(X_plot, y_true, 'k--', linewidth=1.5, alpha=0.6, label='Función verdadera')
+    ax.plot(X_plot, y_pred, color=color, linewidth=2.5, label='Predicción boosting')
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    ax.text(0.04, 0.96, f'MSE = {mse:.3f}', transform=ax.transAxes,
+            va='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), fontsize=9)
+    ax.legend(fontsize=8, loc='lower right')
+    ax.grid(True, alpha=0.3)
+
+plot_panel(axes[0, 0], single_tree, '(a) 1 árbol (aprendiz débil)', 'red')
+for idx, (n_est, color, title) in enumerate(configs):
+    row, col = (0, 1) if idx == 0 else (1, 0) if idx == 1 else (1, 1)
+    plot_panel(axes[row, col], modelos[n_est][0], title, color)
+
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: fig-residuales-boosting
+#| fig-cap: "Evolución de los residuales durante el proceso de boosting. Inicialmente los residuales son grandes y muestran estructura (el modelo aún no captó la señal). Con más iteraciones, los residuales se reducen y se distribuyen aleatoriamente alrededor de cero, lo que indica que el modelo ha aprendido la señal y solo queda ruido irreducible. Cada nueva iteración entrena un árbol para predecir estos residuales y los incorpora al modelo acumulado."
+#| fig-width: 12
+#| fig-height: 4
+#| echo: true
+
+# Usamos los modelos ya entrenados
+gb_1 = GradientBoostingRegressor(n_estimators=1, max_depth=2, learning_rate=0.3, random_state=42)
+gb_5 = modelos[5][0]
+gb_100 = modelos[100][0]
+gb_1.fit(X_train.reshape(-1, 1), y_train)
+
+residuales = {
+    '1 iteración': y_train - gb_1.predict(X_train.reshape(-1, 1)),
+    '5 iteraciones': y_train - gb_5.predict(X_train.reshape(-1, 1)),
+    '100 iteraciones': y_train - gb_100.predict(X_train.reshape(-1, 1)),
+}
+colores = ['tomato', 'steelblue', 'mediumseagreen']
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+for ax, (titulo, res), color in zip(axes, residuales.items(), colores):
+    ax.scatter(X_train, res, alpha=0.6, s=30, c=color, edgecolors='none')
+    ax.axhline(0, color='black', linewidth=1.5, linestyle='--', alpha=0.7)
+    ax.set_title(titulo, fontsize=11, fontweight='bold')
+    ax.set_xlabel('x', fontsize=10)
+    ax.set_ylabel('Residual (y − ŷ)', fontsize=10)
+    ax.text(0.04, 0.96, f'Std = {np.std(res):.3f}', transform=ax.transAxes,
+            va='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+La clave: cada nueva iteración de boosting entrena un árbol para predecir los residuales actuales, y lo *suma* al modelo acumulado. Los residuales son exactamente la señal que el modelo no ha capturado todavía. Este ciclo de "corregir el error restante" es la esencia del método.
+
+---
+
+## Boosting vs Bagging: dos filosofías del error
+
+### Tabla comparativa
+
+Aunque ambos son métodos de ensamble, boosting y bagging atacan el problema desde ángulos opuestos.
+
+| Característica | Bagging / Random Forest | Boosting |
+|----------------|------------------------|----------|
+| **Construcción** | Paralela | Secuencial |
+| **Dependencia entre modelos** | Independiente | Adaptativa |
+| **Error objetivo** | Reduce **varianza** | Reduce **sesgo** |
+| **Aprendiz base** | Árbol profundo (complejo) | Árbol superficial (débil) |
+| **Datos por modelo** | Bootstrap con reemplazo | Todos los datos (ponderados) |
+| **Paralelización** | Total | Limitada (es secuencial) |
+| **Riesgo de sobreajuste** | Bajo | Moderado (requiere regularización) |
+| **Sensibilidad al ruido** | Baja | Alta |
+
+::: {.callout-important}
+## La diferencia fundamental: ¿qué error corrige cada método?
+
+Recuerda la descomposición del error esperado:
+
+$$\text{Error} = \underbrace{\text{Sesgo}^2}_{\text{error sistemático}} + \underbrace{\text{Varianza}}_{\text{inestabilidad}} + \text{Ruido irreducible}$$
+
+- **Bagging y Random Forest**: parten de modelos con *alto sesgo, baja varianza* (árboles superficiales) o *bajo sesgo, alta varianza* (árboles profundos), y al promediar muchos reducen la varianza. El sesgo se mantiene.
+- **Boosting**: parte de modelos simples con *alto sesgo, baja varianza*, y al sumarlos adaptativamente reduce el sesgo. La varianza sube un poco pero se controla con regularización.
+
+Esto explica por qué Random Forest es más robusto con datos ruidosos (la varianza ya estaba controlada) y por qué boosting puede superar a RF cuando los datos son limpios y queremos extraer el máximo rendimiento.
+:::
+
+### Comparación visual de fronteras de decisión
+
+```{python}
+#| label: fig-comparacion-metodos
+#| fig-cap: "Fronteras de decisión de cuatro modelos en el problema 'make_moons' (datos en forma de lunas entrelazadas). Un árbol profundo sobreajusta (alta varianza). Un árbol superficial subajusta (alto sesgo). Random Forest controla la varianza preservando el bajo sesgo. Gradient Boosting reduce el sesgo progresivamente manteniendo la varianza acotada. Las cifras en la esquina superior izquierda de cada panel muestran la precisión en entrenamiento y en prueba."
+#| fig-width: 14
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_moons
+from sklearn.model_selection import train_test_split
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+
+np.random.seed(42)
+X, y = make_moons(n_samples=300, noise=0.25, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=42)
+
+modelos_comp = [
+    ('Árbol profundo\n(sesgo bajo, varianza alta)', DecisionTreeClassifier(max_depth=10, random_state=42), 'salmon'),
+    ('Árbol superficial\n(sesgo alto, varianza baja)', DecisionTreeClassifier(max_depth=1, random_state=42), 'lightblue'),
+    ('Random Forest\n(sesgo bajo, varianza baja)', RandomForestClassifier(n_estimators=100, random_state=42), 'lightgreen'),
+    ('Gradient Boosting\n(sesgo → bajo, varianza controlada)', GradientBoostingClassifier(n_estimators=100, max_depth=1, learning_rate=0.3, random_state=42), 'plum'),
+]
+
+h = 0.02
+x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+xx, yy = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min, y_max, h))
+
+fig, axes = plt.subplots(1, 4, figsize=(14, 5))
+
+for ax, (titulo, modelo, color) in zip(axes, modelos_comp):
+    modelo.fit(X_tr, y_tr)
+    Z = modelo.predict(np.c_[xx.ravel(), yy.ravel()]).reshape(xx.shape)
+    ax.contourf(xx, yy, Z, alpha=0.25, cmap='RdYlBu', levels=1)
+    ax.scatter(X_tr[:, 0], X_tr[:, 1], c=y_tr, cmap='RdYlBu', edgecolors='k', s=35, linewidths=0.7, alpha=0.8)
+    ax.scatter(X_te[:, 0], X_te[:, 1], c=y_te, cmap='RdYlBu', edgecolors='k', s=35, linewidths=1.2, alpha=0.4, marker='^')
+    acc_tr = modelo.score(X_tr, y_tr)
+    acc_te = modelo.score(X_te, y_te)
+    ax.text(0.04, 0.97, f'Train: {acc_tr:.2f}\nTest:  {acc_te:.2f}',
+            transform=ax.transAxes, va='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.85), fontsize=9)
+    ax.set_title(titulo, fontsize=10, fontweight='bold')
+    ax.set_xlim(xx.min(), xx.max())
+    ax.set_ylim(yy.min(), yy.max())
+    ax.set_xlabel('$x_1$', fontsize=9)
+    ax.set_ylabel('$x_2$', fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-tip}
+## ¿Cuándo usar cada método?
+
+**Prefiere Random Forest cuando:**
+
+- Los datos tienen **ruido o etiquetas imprecisas** (Random Forest es más robusto)
+- Necesitas un modelo **rápido de entrenar** (paralelizable)
+- Quieres buenos resultados con **poco ajuste** de hiperparámetros
+- Los datos son **desbalanceados** o con muchos outliers
+
+**Prefiere Boosting cuando:**
+
+- Los datos son **limpios y confiables**
+- Quieres **exprimir el máximo rendimiento** (competencias, producción crítica)
+- Puedes invertir tiempo en **ajuste de hiperparámetros** y validación
+- Tienes un modelo que ya sabes que tiene sesgo alto
+
+**Regla de oro**: empieza con Random Forest. Si no alcanza el rendimiento requerido y los datos son confiables, prueba boosting con cuidado.
+:::
+
+---
+
+## AdaBoost: el primer algoritmo práctico
+
+### Contexto histórico
+
+AdaBoost (Adaptive Boosting) fue desarrollado por Freund y Schapire en 1997 y ganó el Premio Gödel en 2003, uno de los más importantes en teoría de la computación. Fue el primer algoritmo que demostró que la idea de "combinar aprendices débiles" era práctica, eficiente y teóricamente sólida.
+
+Su mecanismo es elegante: en lugar de manipular los residuales directamente (como hará Gradient Boosting), AdaBoost mantiene un **vector de pesos** sobre los ejemplos de entrenamiento y en cada iteración aumenta el peso de los ejemplos mal clasificados, forzando al siguiente modelo a prestarles más atención.
+
+### El algoritmo paso a paso
+
+Dado un conjunto de entrenamiento $\{(x_i, y_i)\}_{i=1}^n$ con $y_i \in \{-1, +1\}$:
+
+**1. Inicializar pesos uniformes:**
+
+$$w_i^{(1)} = \frac{1}{n}, \quad i = 1, \ldots, n$$
+
+**2. Para cada iteración** $m = 1, 2, \ldots, M$:
+
+  **a.** Entrenar clasificador débil $h_m(x)$ sobre los datos con pesos $w^{(m)}$
+
+  **b.** Calcular la **tasa de error ponderada**:
+  $$\epsilon_m = \sum_{i:\, h_m(x_i) \neq y_i} w_i^{(m)}$$
+
+  **c.** Calcular el **peso del clasificador** (cuánto "creemos" en él):
+  $$\alpha_m = \frac{1}{2} \ln\!\left(\frac{1 - \epsilon_m}{\epsilon_m}\right)$$
+
+  **d.** **Actualizar pesos** de los ejemplos:
+  $$w_i^{(m+1)} = w_i^{(m)} \cdot \exp\!\left(-\alpha_m \, y_i \, h_m(x_i)\right), \quad \text{luego normalizar}$$
+
+**3. Predicción final:**
+
+$$H(x) = \text{sign}\!\left(\sum_{m=1}^{M} \alpha_m \, h_m(x)\right)$$
+
+::: {.callout-note}
+## ¿Por qué $\alpha_m = \frac{1}{2}\ln\frac{1-\epsilon_m}{\epsilon_m}$?
+
+La fórmula no es arbitraria: surge de minimizar la **pérdida exponencial** $L = \sum_i \exp(-y_i F(x_i))$.
+
+Interpretación intuitiva:
+
+- $\epsilon_m \approx 0$ (clasificador casi perfecto): $\alpha_m \to +\infty$ — le damos todo el peso
+- $\epsilon_m = 0.5$ (adivinanza aleatoria): $\alpha_m = 0$ — lo ignoramos por completo
+- $\epsilon_m > 0.5$ (peor que el azar): $\alpha_m < 0$ — invertimos su predicción
+
+La **actualización de pesos** funciona así: si $y_i = h_m(x_i)$ (clasificado bien), $w_i$ decrece (lo hacemos "menos importante"). Si $y_i \neq h_m(x_i)$ (clasificado mal), $w_i$ crece (se vuelve más urgente). El siguiente clasificador verá un conjunto donde los errores anteriores son más prominentes.
+:::
+
+### Visualización del proceso
+
+```{python}
+#| label: fig-adaboost-evolucion
+#| fig-cap: "Evolución de AdaBoost en un problema de clasificación 2D. Los círculos de entrenamiento tienen tamaño proporcional a su peso en AdaBoost: los puntos más grandes son los que el algoritmo considera más difíciles en esa iteración. La frontera de decisión se vuelve cada vez más refinada conforme se suman más clasificadores débiles. Los triángulos grises representan los datos de prueba (no influyen en los pesos)."
+#| fig-width: 14
+#| fig-height: 7
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_classification
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import train_test_split
+
+np.random.seed(42)
+X_ada, y_ada = make_classification(
+    n_samples=200, n_features=2, n_redundant=0, n_informative=2,
+    n_clusters_per_class=1, flip_y=0.08, random_state=42
+)
+X_ada_tr, X_ada_te, y_ada_tr, y_ada_te = train_test_split(X_ada, y_ada, test_size=0.3, random_state=42)
+
+h = 0.03
+x_min, x_max = X_ada[:, 0].min() - 1, X_ada[:, 0].max() + 1
+y_min_a, y_max_a = X_ada[:, 1].min() - 1, X_ada[:, 1].max() + 1
+xx_a, yy_a = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min_a, y_max_a, h))
+
+def pesos_aproximados(model, X, y):
+    pesos = np.ones(len(X))
+    for estimador, alpha in zip(model.estimators_, model.estimator_weights_):
+        erroneos = (estimador.predict(X) != y)
+        pesos[erroneos] *= np.exp(alpha)
+    return pesos / pesos.sum() * len(X)
+
+n_iter_list = [1, 5, 20, 100]
+fig, axes = plt.subplots(2, 2, figsize=(14, 7))
+axes = axes.ravel()
+
+for ax, n_iter in zip(axes, n_iter_list):
+    ada = AdaBoostClassifier(
+        estimator=DecisionTreeClassifier(max_depth=1),
+        n_estimators=n_iter, learning_rate=1.0, random_state=42
+    )
+    ada.fit(X_ada_tr, y_ada_tr)
+
+    Z_a = ada.predict(np.c_[xx_a.ravel(), yy_a.ravel()]).reshape(xx_a.shape)
+    ax.contourf(xx_a, yy_a, Z_a, alpha=0.2, cmap='RdYlBu', levels=1)
+
+    pesos = pesos_aproximados(ada, X_ada_tr, y_ada_tr)
+    ax.scatter(X_ada_tr[:, 0], X_ada_tr[:, 1], c=y_ada_tr, cmap='RdYlBu',
+               s=pesos * 80, edgecolors='k', linewidths=0.7, alpha=0.75, zorder=3)
+    ax.scatter(X_ada_te[:, 0], X_ada_te[:, 1], c=y_ada_te, cmap='RdYlBu',
+               s=20, marker='^', edgecolors='gray', alpha=0.4, linewidths=0.5)
+
+    acc_tr = ada.score(X_ada_tr, y_ada_tr)
+    acc_te = ada.score(X_ada_te, y_ada_te)
+    ax.text(0.04, 0.97, f'{n_iter} iteraciones\nTrain: {acc_tr:.2f} | Test: {acc_te:.2f}',
+            transform=ax.transAxes, va='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.85), fontsize=9)
+    ax.set_xlim(xx_a.min(), xx_a.max())
+    ax.set_ylim(yy_a.min(), yy_a.max())
+    ax.set_xlabel('$x_1$', fontsize=9)
+    ax.set_ylabel('$x_2$', fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+fig.text(0.5, 0.01,
+    'Tamaño del punto ∝ peso en AdaBoost (puntos grandes = ejemplos difíciles)',
+    ha='center', fontsize=9, style='italic',
+    bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.7))
+plt.tight_layout(rect=[0, 0.04, 1, 1])
+plt.show()
+```
+
+### Sensibilidad a outliers
+
+AdaBoost tiene una debilidad conocida: los **outliers y etiquetas erróneas** reciben pesos que crecen exponencialmente con cada iteración, porque el algoritmo insiste en clasificarlos correctamente aunque sea imposible. Esto puede llevar a sobreajuste severo.
+
+::: {.callout-warning}
+## AdaBoost y el ruido
+
+Si un ejemplo tiene una etiqueta incorrecta, AdaBoost le asignará cada vez más peso hasta que algún clasificador lo ajuste, contaminando el modelo. Para datasets con >5–10% de etiquetas ruidosas, **Random Forest o Gradient Boosting con pérdida robusta** son mejores opciones.
+:::
+
+```{python}
+#| label: fig-adaboost-outliers
+#| fig-cap: "Sensibilidad de AdaBoost al ruido. Izquierda: datos limpios — AdaBoost aprende una frontera razonable. Derecha: mismos datos con un 15% de etiquetas invertidas — AdaBoost sobreajusta agresivamente intentando clasificar los puntos ruidosos, produciendo una frontera irregular. Random Forest (línea punteada) mantiene una frontera estable en ambos casos."
+#| fig-width: 12
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_moons
+from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import train_test_split
+
+np.random.seed(42)
+X_m, y_m = make_moons(n_samples=300, noise=0.2, random_state=42)
+X_m_tr, X_m_te, y_m_tr, y_m_te = train_test_split(X_m, y_m, test_size=0.25, random_state=42)
+
+# Versión ruidosa: invertir 15% de etiquetas
+y_ruidoso = y_m_tr.copy()
+idx_ruido = np.random.choice(len(y_ruidoso), size=int(0.15 * len(y_ruidoso)), replace=False)
+y_ruidoso[idx_ruido] = 1 - y_ruidoso[idx_ruido]
+
+h = 0.025
+x_min, x_max = X_m[:, 0].min() - 0.5, X_m[:, 0].max() + 0.5
+y_min_m, y_max_m = X_m[:, 1].min() - 0.5, X_m[:, 1].max() + 0.5
+xx_m, yy_m = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min_m, y_max_m, h))
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+titulos = ['Datos limpios', 'Datos con 15% de ruido']
+y_sets = [y_m_tr, y_ruidoso]
+
+for ax, titulo, y_set in zip(axes, titulos, y_sets):
+    ada = AdaBoostClassifier(estimator=DecisionTreeClassifier(max_depth=1),
+                             n_estimators=100, learning_rate=1.0, random_state=42)
+    rf = RandomForestClassifier(n_estimators=100, random_state=42)
+    ada.fit(X_m_tr, y_set)
+    rf.fit(X_m_tr, y_set)
+
+    Z_ada = ada.predict(np.c_[xx_m.ravel(), yy_m.ravel()]).reshape(xx_m.shape)
+    Z_rf  = rf.predict(np.c_[xx_m.ravel(), yy_m.ravel()]).reshape(xx_m.shape)
+
+    ax.contourf(xx_m, yy_m, Z_ada, alpha=0.25, cmap='RdYlBu', levels=1)
+    ax.contour(xx_m, yy_m, Z_rf, levels=1, colors='black', linewidths=1.5, linestyles='--', alpha=0.7)
+    ax.scatter(X_m_tr[:, 0], X_m_tr[:, 1], c=y_set, cmap='RdYlBu',
+               edgecolors='k', s=40, linewidths=0.5, alpha=0.7)
+
+    acc_ada = ada.score(X_m_te, y_m_te)
+    acc_rf  = rf.score(X_m_te, y_m_te)
+    ax.text(0.04, 0.97, f'AdaBoost test: {acc_ada:.2f}\nRF test:       {acc_rf:.2f}',
+            transform=ax.transAxes, va='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.85), fontsize=9)
+    ax.set_title(titulo, fontsize=12, fontweight='bold')
+    ax.set_xlim(xx_m.min(), xx_m.max())
+    ax.set_ylim(yy_m.min(), yy_m.max())
+    ax.grid(True, alpha=0.2)
+
+plt.tight_layout()
+plt.show()
+```
+
+### La pérdida exponencial: virtud y limitación
+
+La sensibilidad de AdaBoost al ruido no es un accidente de implementación — está codificada en su fundamento matemático. La regla de actualización de pesos:
+
+$$w_i^{(m+1)} = w_i^{(m)} \cdot \exp\!\left(-\alpha_m \, y_i \, h_m(x_i)\right)$$
+
+no es una elección arbitraria. Es exactamente el **gradiente negativo** de la función de pérdida exponencial:
+
+$$L = \sum_{i=1}^n \exp\!\left(-y_i \, F(x_i)\right)$$
+
+Si derivas $L$ respecto a $F(x_i)$:
+
+$$-\frac{\partial L}{\partial F(x_i)} = y_i \exp\!\left(-y_i F(x_i)\right) \propto w_i^{(m)}$$
+
+Los pesos de AdaBoost **son** el gradiente negativo de la pérdida exponencial evaluado en el modelo actual. AdaBoost no "elige" esa pérdida conscientemente — está construido sobre ella sin saberlo. Gradient Boosting lo hace explícito y generaliza la idea a cualquier pérdida.
+
+El problema concreto: la función exponencial crece **muy rápido** para errores grandes (margen muy negativo), mucho más que el log-loss.
+
+```{python}
+#| label: fig-perdidas-comparacion
+#| fig-cap: "Comparación de funciones de pérdida en función del margen $y \\cdot F(x)$. Un margen positivo significa predicción correcta; uno negativo, predicción incorrecta. La pérdida exponencial (AdaBoost) crece sin límite hacia la izquierda, penalizando los errores grandes de forma desproporcionada. El log-loss (Gradient Boosting estándar) crece linealmente para errores grandes, lo que la hace mucho más robusta a outliers y etiquetas ruidosas."
+#| fig-width: 8
+#| fig-height: 4
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+margen = np.linspace(-3, 3, 300)  # y·F(x): positivo = correcto, negativo = incorrecto
+
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.plot(margen, np.exp(-margen),
+        label='Pérdida exponencial (AdaBoost)', linewidth=2.5, color='tomato')
+ax.plot(margen, np.log(1 + np.exp(-2 * margen)),
+        label='Log-loss (Gradient Boosting)', linewidth=2.5, color='steelblue')
+ax.plot(margen, np.maximum(0, 1 - margen),
+        label='Hinge loss (referencia)', linewidth=2, color='gray', linestyle='--')
+
+ax.axvline(0, color='black', linewidth=0.8, linestyle=':')
+ax.annotate('Predicción\ncorrecta →', xy=(0.2, 4.5), fontsize=9, color='darkgreen')
+ax.annotate('← Predicción\n    incorrecta', xy=(-2.8, 4.5), fontsize=9, color='darkred')
+
+ax.set_xlabel('Margen  $y \\cdot F(x)$', fontsize=11)
+ax.set_ylabel('Pérdida', fontsize=11)
+ax.set_ylim(0, 6)
+ax.legend(fontsize=10)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+Cuando el modelo está muy equivocado (margen muy negativo), la pérdida exponencial se dispara mientras el log-loss solo crece linealmente. Un outlier con etiqueta incorrecta recibirá un peso $w_i$ astronómico y AdaBoost obsesionará con él el resto del entrenamiento.
+
+### Por qué AdaBoost está atado a clasificación binaria
+
+El producto $y_i \, h_m(x_i)$ del que depende toda la maquinaria de AdaBoost solo tiene sentido con $y_i \in \{-1, +1\}$:
+
+| Caso | Producto | Efecto en $w_i$ |
+|------|----------|-----------------|
+| Predicción correcta | $y_i \, h_m(x_i) = +1$ | $w_i$ **baja** (× $e^{-\alpha_m}$) |
+| Predicción incorrecta | $y_i \, h_m(x_i) = -1$ | $w_i$ **sube** (× $e^{+\alpha_m}$) |
+
+La codificación $\{-1, +1\}$ convierte "acerté / fallé" en un número que entra directamente en el exponente. Para **regresión** no existe noción binaria de acierto, y para **multiclase** el producto $y_i h_m(x_i)$ no está definido de la misma forma.
+
+::: {.callout-note}
+## AdaBoost es un caso especial de Gradient Boosting
+
+Todo esto se unifica elegantemente: AdaBoost es exactamente Gradient Boosting con pérdida exponencial. Gradient Boosting generaliza el mecanismo para funciones de pérdida arbitrarias — log-loss para clasificación robusta, MSE o Huber para regresión — liberándolo de las limitaciones de la pérdida exponencial y del marco binario.
+:::
+
+---
+
+## Gradient Boosting: la generalización poderosa
+
+### De AdaBoost a la optimización funcional
+
+Con ese contexto, las limitaciones de AdaBoost son precisas: está atado a la **pérdida exponencial** y al problema de **clasificación binaria**. En 2001, Jerome Friedman reconoció que AdaBoost es un algoritmo de **descenso por gradiente en el espacio de funciones**, y generalizó esta idea para trabajar con *cualquier* función de pérdida diferenciable.
+
+La analogía con el descenso por gradiente clásico es clave:
+
+| Descenso por gradiente clásico | Gradient Boosting |
+|-------------------------------|-------------------|
+| Minimiza $L(\theta)$ moviendo parámetros $\theta$ | Minimiza $L(F)$ moviendo la función de predicción $F$ |
+| Calcula gradiente $\nabla_\theta L$ | Calcula pseudo-residuales $r_i = -\partial L / \partial F(x_i)$ |
+| Da un paso: $\theta \leftarrow \theta - \eta \nabla L$ | Ajusta un árbol a los pseudo-residuales y lo suma |
+| El learning rate $\eta$ controla el tamaño del paso | El learning rate $\nu$ escala cada árbol nuevo |
+
+### El algoritmo
+
+**Inicialización:** predicción constante óptima
+
+$$F_0(x) = \arg\min_\gamma \sum_{i=1}^n L(y_i, \gamma)$$
+
+Por ejemplo, para la pérdida cuadrática $L = \frac{1}{2}(y - F)^2$, el óptimo es $F_0 = \bar{y}$.
+
+**Para cada iteración** $m = 1, \ldots, M$:
+
+1. **Calcular los pseudo-residuales** (gradiente negativo de la pérdida):
+
+$$r_{im} = -\left[\frac{\partial L(y_i, F(x_i))}{\partial F(x_i)}\right]_{F = F_{m-1}}$$
+
+Para la pérdida cuadrática, $r_{im} = y_i - F_{m-1}(x_i)$ — ¡son simplemente los residuales!
+
+2. **Entrenar un árbol $h_m$ para predecir los pseudo-residuales** $r_{im}$
+
+3. **Actualizar el modelo** con learning rate $\nu \in (0, 1]$:
+
+$$F_m(x) = F_{m-1}(x) + \nu \cdot h_m(x)$$
+
+**Predicción final:** $\hat{y} = F_M(x)$
+
+::: {.callout-note}
+## ¿Por qué los pseudo-residuales?
+
+El gradiente negativo $r_{im}$ indica en qué dirección y cuánto deberíamos cambiar la predicción actual $F_{m-1}(x_i)$ para reducir la pérdida. Si $r_{im} > 0$, la predicción es demasiado baja; si $r_{im} < 0$, es demasiado alta.
+
+Entrenar un árbol para predecir $r_{im}$ es entonces entrenar un árbol para predecir "en qué dirección estamos equivocados". Sumarlo al modelo actual lo corrige.
+
+Para la pérdida cuadrática, los pseudo-residuales son exactamente los residuales estándar $y_i - \hat{y}_i$, lo que hace la conexión muy intuitiva. Para otras pérdidas (log-loss, Huber), los pseudo-residuales tienen formas diferentes pero la misma interpretación.
+:::
+
+### Funciones de pérdida
+
+Una de las mayores ventajas de Gradient Boosting es que podemos elegir la pérdida según el problema:
+
+| Tarea | Pérdida | Pseudo-residual | Cuándo usarla |
+|-------|---------|-----------------|---------------|
+| Regresión | MSE: $\frac{1}{2}(y - F)^2$ | $y - F$ | Estándar, sensible a outliers |
+| Regresión robusta | MAE: $\|y - F\|$ | $\text{sign}(y - F)$ | Con outliers moderados |
+| Regresión robusta | Huber ($\delta$) | MSE si $\|r\| \leq \delta$, MAE si no | Mejor balance |
+| Clasificación binaria | Log-loss | $y - \sigma(F)$ | Estándar, más robusta que exponencial |
+| Clasificación | Exponencial | (equivale a AdaBoost) | Solo si datos muy limpios |
+
+### Gradient Boosting en un problema de regresión real
+
+Usaremos el dataset **California Housing** para ver el proceso completo: cómo las predicciones mejoran con cada iteración y cómo el error de validación eventualmente se estabiliza (señal para usar early stopping).
+
+```{python}
+#| label: fig-gb-california
+#| fig-cap: "Gradient Boosting en California Housing. Arriba: predicciones vs valores reales en test después de 1, 10, 50 y 100 árboles. La diagonal representaría predicciones perfectas. Con más árboles, los puntos se acercan a la diagonal y el R² mejora. Abajo: curvas de aprendizaje — el RMSE en train sigue bajando monotónicamente, pero el RMSE en test se estabiliza; hay un punto óptimo (marcado en verde) más allá del cual agregar árboles ya no beneficia al rendimiento fuera de muestra."
+#| fig-width: 14
+#| fig-height: 10
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import fetch_california_housing
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+
+np.random.seed(42)
+housing = fetch_california_housing()
+X_h, y_h = housing.data, housing.target
+
+idx = np.random.choice(len(X_h), size=5000, replace=False)
+X_h, y_h = X_h[idx], y_h[idx]
+X_h_tr, X_h_te, y_h_tr, y_h_te = train_test_split(X_h, y_h, test_size=0.25, random_state=42)
+
+gb_full = GradientBoostingRegressor(n_estimators=200, max_depth=3, learning_rate=0.1, random_state=42)
+gb_full.fit(X_h_tr, y_h_tr)
+
+# Curvas de aprendizaje
+train_rmse, test_rmse = [], []
+for y_tr_pred, y_te_pred in zip(gb_full.staged_predict(X_h_tr), gb_full.staged_predict(X_h_te)):
+    train_rmse.append(np.sqrt(mean_squared_error(y_h_tr, y_tr_pred)))
+    test_rmse.append(np.sqrt(mean_squared_error(y_h_te, y_te_pred)))
+
+mejor_n = int(np.argmin(test_rmse)) + 1
+
+fig = plt.figure(figsize=(14, 10))
+gs = fig.add_gridspec(2, 4, hspace=0.35, wspace=0.3)
+
+n_iters = [1, 10, 50, 100]
+colores_iter = ['tomato', 'orange', 'steelblue', 'purple']
+
+gb_temp = GradientBoostingRegressor(max_depth=3, learning_rate=0.1, random_state=42)
+for idx_n, (n_est, color) in enumerate(zip(n_iters, colores_iter)):
+    ax = fig.add_subplot(gs[0, idx_n])
+    gb_temp.set_params(n_estimators=n_est)
+    gb_temp.fit(X_h_tr, y_h_tr)
+    y_pred = gb_temp.predict(X_h_te)
+    r2 = r2_score(y_h_te, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_h_te, y_pred))
+
+    ax.scatter(y_h_te, y_pred, alpha=0.3, s=12, c=color, edgecolors='none')
+    lims = [min(y_h_te.min(), y_pred.min()), max(y_h_te.max(), y_pred.max())]
+    ax.plot(lims, lims, 'k--', linewidth=1.5, alpha=0.7)
+    ax.text(0.04, 0.97, f'{n_est} árboles\nRMSE = {rmse:.3f}\nR² = {r2:.3f}',
+            transform=ax.transAxes, va='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.85), fontsize=8)
+    ax.set_xlabel('Valor real', fontsize=9)
+    ax.set_ylabel('Predicción', fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+# Curvas de aprendizaje en la fila inferior (span completo)
+ax_curvas = fig.add_subplot(gs[1, :])
+ax_curvas.plot(range(1, 201), train_rmse, 'steelblue', linewidth=2, label='RMSE entrenamiento')
+ax_curvas.plot(range(1, 201), test_rmse, 'tomato', linewidth=2, label='RMSE prueba')
+ax_curvas.axvline(mejor_n, color='green', linestyle='--', linewidth=2, alpha=0.8)
+ax_curvas.plot(mejor_n, test_rmse[mejor_n - 1], 'go', markersize=10, zorder=5)
+ax_curvas.text(mejor_n + 4, test_rmse[mejor_n - 1] + 0.01,
+               f'Óptimo: {mejor_n} árboles\nRMSE = {test_rmse[mejor_n - 1]:.3f}',
+               fontsize=9, color='green', fontweight='bold')
+ax_curvas.set_xlabel('Número de árboles (iteraciones)', fontsize=11)
+ax_curvas.set_ylabel('RMSE', fontsize=11)
+ax_curvas.set_title('Curvas de aprendizaje de Gradient Boosting', fontsize=12, fontweight='bold')
+ax_curvas.legend(fontsize=10)
+ax_curvas.grid(True, alpha=0.3)
+
+plt.show()
+```
+
+### Hiperparámetros principales
+
+Los tres hiperparámetros más importantes de Gradient Boosting tienen efectos claros y relacionados entre sí:
+
+::: {.callout-important}
+## El triángulo de hiperparámetros
+
+Existe una relación de intercambio fundamental:
+
+$$\text{learning\_rate} \times n\_\text{estimators} \approx \text{constante}$$
+
+Si reduces el learning rate a la mitad, necesitas el doble de árboles para alcanzar el mismo rendimiento. Un learning rate bajo produce modelos más robustos pero más lentos. **Regla práctica**: usa `learning_rate = 0.05–0.1` con `n_estimators = 100–500`, y deja que el **early stopping** determine el número exacto de árboles.
+:::
+
+```{python}
+#| label: fig-hiperparametros-gb
+#| fig-cap: "Efecto de los tres hiperparámetros principales de Gradient Boosting en el RMSE de prueba sobre California Housing. (a) Learning rate: valores bajos aprenden gradualmente y son más robustos. (b) Profundidad máxima: árboles más profundos capturan interacciones complejas pero pueden sobreajustar. (c) Subsample: agregar aleatoriedad (muestrear una fracción de los datos por árbol) actúa como regularización."
+#| fig-width: 14
+#| fig-height: 4
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import fetch_california_housing
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+
+np.random.seed(42)
+housing = fetch_california_housing()
+X_hp, y_hp = housing.data, housing.target
+idx_hp = np.random.choice(len(X_hp), 4000, replace=False)
+X_hp, y_hp = X_hp[idx_hp], y_hp[idx_hp]
+X_hp_tr, X_hp_te, y_hp_tr, y_hp_te = train_test_split(X_hp, y_hp, test_size=0.25, random_state=42)
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+
+def curva_test(ax, param_name, valores, colores, titulo, base_params):
+    for val, color in zip(valores, colores):
+        params = {**base_params, param_name: val, 'n_estimators': 200, 'random_state': 42}
+        gb = GradientBoostingRegressor(**params)
+        gb.fit(X_hp_tr, y_hp_tr)
+        errores = [np.sqrt(mean_squared_error(y_hp_te, p)) for p in gb.staged_predict(X_hp_te)]
+        ax.plot(range(1, 201), errores, color=color, linewidth=2, label=f'{param_name} = {val}', alpha=0.8)
+    ax.set_xlabel('Número de árboles', fontsize=10)
+    ax.set_ylabel('RMSE (test)', fontsize=10)
+    ax.set_title(titulo, fontsize=11, fontweight='bold')
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0.45, 1.1)
+
+base = {'max_depth': 3, 'learning_rate': 0.1, 'subsample': 1.0}
+curva_test(axes[0], 'learning_rate', [0.01, 0.05, 0.1, 0.5],
+           ['navy', 'steelblue', 'orange', 'red'], '(a) Efecto del learning rate', base)
+curva_test(axes[1], 'max_depth', [1, 2, 3, 5],
+           ['navy', 'steelblue', 'orange', 'red'], '(b) Efecto de la profundidad máxima', base)
+curva_test(axes[2], 'subsample', [0.5, 0.7, 0.9, 1.0],
+           ['red', 'orange', 'steelblue', 'navy'], '(c) Efecto del subsample', base)
+
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+## Implementaciones modernas: XGBoost, LightGBM y CatBoost
+
+Gradient Boosting de scikit-learn es una excelente herramienta pedagógica, pero para producción existen tres implementaciones que lo mejoran de manera fundamental. Cada una introduce innovaciones algorítmicas concretas — no solo optimizaciones de ingeniería — que cambian el comportamiento del modelo.
+
+---
+
+### XGBoost: Newton Boosting con regularización explícita
+
+**eXtreme Gradient Boosting** (Chen & Guestrin, 2016) es la implementación más usada en competencias e industria. Su innovación central es usar **optimización de segundo orden** (método de Newton) en lugar del gradiente de primer orden del GB clásico.
+
+#### La función objetivo de XGBoost
+
+En cada iteración $m$, XGBoost minimiza:
+
+$$\mathcal{L}^{(m)} = \sum_{i=1}^n L\!\left(y_i,\, \hat{y}_i^{(m-1)} + h_m(x_i)\right) + \Omega(h_m)$$
+
+donde el término de regularización penaliza simultáneamente la complejidad del árbol:
+
+$$\Omega(h) = \underbrace{\gamma T}_{\text{nº de hojas}} + \underbrace{\frac{1}{2}\lambda \sum_{j=1}^T w_j^2}_{\text{L2 sobre pesos}} + \underbrace{\alpha \sum_{j=1}^T |w_j|}_{\text{L1 sobre pesos}}$$
+
+- $T$ = número de hojas, $w_j$ = predicción en la hoja $j$
+- $\gamma$ penaliza cada hoja adicional (árbol más simple)
+- $\lambda$ regulariza los pesos con L2 (como Ridge)
+- $\alpha$ regulariza los pesos con L1 (induce esparsidad, como Lasso)
+
+Esto es cualitativamente diferente a sklearn: allí la regularización se hace indirectamente limitando la profundidad; en XGBoost está incorporada en el criterio de división mismo.
+
+#### Newton Boosting: por qué importa la segunda derivada
+
+GB clásico ajusta cada árbol a los pseudo-residuales $r_i$ (primera derivada de la pérdida). XGBoost va un paso más: usa también la **segunda derivada** (*Hessian*) $h_i = \partial^2 L / \partial \hat{y}_i^2$ para calcular el peso óptimo de cada hoja directamente:
+
+$$w_j^* = -\frac{\sum_{i \in \text{hoja}_j} g_i}{\sum_{i \in \text{hoja}_j} h_i + \lambda}$$
+
+donde $g_i$ es el gradiente y $h_i$ el Hessian de la observación $i$. El Hessian mide la **curvatura local** de la pérdida: si la pérdida es muy curva en $x_i$, ese punto es más "sensible" y su contribución se pondera distinto. Esto hace la optimización más precisa y converge más rápido, análogo a por qué el método de Newton supera al gradiente descendente en optimización clásica.
+
+#### Búsqueda de splits: exacto vs. aproximado
+
+Para encontrar el mejor punto de corte en cada nodo, XGBoost tiene dos modos:
+
+- **Exact greedy**: evalúa todos los posibles valores de corte para cada feature. Óptimo pero $O(n \cdot p)$ por nodo.
+- **Approximate (histogram)**: discretiza cada feature en $K$ bins y solo evalúa los límites de bins. Reduce la complejidad a $O(K \cdot p)$, con pérdida mínima de precisión.
+
+Además, el **sparsity-aware algorithm** aprende automáticamente la dirección óptima para enviar los valores nulos en cada split — no necesitas imputar antes de entrenar.
+
+```{python}
+#| label: fig-xgboost-importancias
+#| fig-cap: "XGBoost ofrece tres tipos de importancia de features, cada uno con una interpretación distinta. *Weight*: número de veces que la feature aparece en un split (favorece features numéricas con muchos candidatos). *Gain*: ganancia media en pérdida cuando se usa la feature — la métrica más informativa. *Cover*: número medio de observaciones que pasan por los nodos donde se usa la feature. Las tres métricas pueden dar rankings distintos; *gain* es la más recomendada."
+#| fig-width: 13
+#| fig-height: 4
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import fetch_california_housing
+from sklearn.model_selection import train_test_split
+import warnings
+warnings.filterwarnings('ignore')
+
+try:
+    import xgboost as xgb
+    XGB_OK = True
+except ImportError:
+    XGB_OK = False
+
+np.random.seed(42)
+housing = fetch_california_housing()
+X_xi = housing.data
+y_xi = housing.target
+nombres_xi = list(housing.feature_names)
+X_xi_tr, X_xi_te, y_xi_tr, y_xi_te = train_test_split(X_xi, y_xi, test_size=0.2, random_state=42)
+
+if XGB_OK:
+    modelo_xi = xgb.XGBRegressor(n_estimators=200, learning_rate=0.1,
+                                   max_depth=5, subsample=0.8,
+                                   colsample_bytree=0.8, verbosity=0, random_state=42)
+    modelo_xi.fit(X_xi_tr, y_xi_tr)
+
+    booster = modelo_xi.get_booster()
+    tipos = ['weight', 'gain', 'cover']
+    titulos = ['Weight\n(frecuencia de uso)', 'Gain\n(reducción de pérdida)', 'Cover\n(observaciones cubiertas)']
+    colores_xi = ['steelblue', 'tomato', 'mediumseagreen']
+
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+    for ax, tipo, titulo, color in zip(axes, tipos, titulos, colores_xi):
+        scores = booster.get_score(importance_type=tipo)
+        # Rellenar features que no aparecen con 0
+        imp = np.array([scores.get(f'f{i}', 0) for i in range(len(nombres_xi))])
+        imp = imp / imp.sum()  # Normalizar
+        orden = np.argsort(imp)
+        ax.barh(range(len(nombres_xi)), imp[orden], color=color, alpha=0.8, edgecolor='white')
+        ax.set_yticks(range(len(nombres_xi)))
+        ax.set_yticklabels([nombres_xi[i] for i in orden], fontsize=8)
+        ax.set_title(titulo, fontsize=10, fontweight='bold')
+        ax.set_xlabel('Importancia (normalizada)', fontsize=9)
+        ax.grid(True, alpha=0.3, axis='x')
+
+    plt.tight_layout()
+    plt.show()
+else:
+    print("XGBoost no disponible — instalar con: pip install xgboost")
+```
+
+::: {.callout-note}
+## Los tres tipos de importancia en XGBoost
+
+| Tipo | Pregunta que responde | Cuándo usarla |
+|------|----------------------|---------------|
+| **Weight** | ¿Cuántas veces se usa en splits? | Rara vez — favorece features numéricas con muchos candidatos |
+| **Gain** | ¿Cuánto reduce el error en promedio? | La más recomendada: mide utilidad real |
+| **Cover** | ¿A cuántas observaciones afecta? | Útil para entender qué tan "global" es una feature |
+
+Los tres rankings pueden diferir. Si `Gain` y `Weight` discrepan mucho, es señal de que algunas features se usan frecuentemente pero aportan poco (ruido).
+:::
+
+---
+
+### LightGBM: velocidad sin sacrificar precisión
+
+**Light Gradient Boosting Machine** (Microsoft, 2017) fue diseñado para datasets que hacen lento a XGBoost. Introduce tres innovaciones algorítmicas que atacan el cuello de botella de la búsqueda de splits.
+
+#### 1. Crecimiento leaf-wise vs. level-wise
+
+Esta es la diferencia más visible. El GB clásico y XGBoost crecen los árboles **nivel por nivel**: en cada paso expanden *todos* los nodos del nivel actual. LightGBM crece **hoja por hoja**: en cada paso elige la *única* hoja cuya división reduce más la pérdida, sin importar en qué nivel esté.
+
+```
+Level-wise (XGBoost/sklearn):    Leaf-wise (LightGBM):
+
+Nivel 0:      [R]                     [R]
+              / \                     / \
+Nivel 1:    [A] [B]   →            [A] [B]
+            / \ / \                    / \
+Nivel 2:  [] [][] []               [C] [D]
+                                      / \
+                                   [E] [F]
+```
+
+Con el mismo número de hojas, leaf-wise produce árboles más asimétricos pero alcanza menor error: divide donde más gana, no donde toca por turno.
+
+**La trampa**: árboles muy desequilibrados pueden sobreajustar. Se controla con `num_leaves` (no `max_depth`).
+
+::: {.callout-important}
+## `num_leaves` es el hiperparámetro crítico de LightGBM
+
+En LightGBM, `num_leaves` importa más que `max_depth`. Un árbol de `max_depth=5` tiene a lo sumo $2^5 = 32$ hojas; con `num_leaves=31` obtienes esa capacidad expresiva con crecimiento leaf-wise. La relación práctica:
+
+$$\text{num\_leaves} \leq 2^{\text{max\_depth}}$$
+
+Valores típicos: `num_leaves = 20–50` para evitar sobreajuste. Si el modelo sobreajusta, reduce `num_leaves` y aumenta `min_data_in_leaf` antes de tocar `max_depth`.
+:::
+
+#### 2. GOSS: muestreo inteligente de observaciones
+
+En cada árbol, calcular la ganancia de todos los posibles splits sobre *todas* las observaciones es costoso. LightGBM observa que **no todas las observaciones contribuyen igual**: las mal predichas (gradiente grande) son más informativas para encontrar buenos splits que las bien predichas (gradiente pequeño).
+
+**GOSS** (Gradient-based One-Side Sampling):
+
+1. Ordena las observaciones por $|g_i|$ (valor absoluto del gradiente)
+2. Conserva el top $a\%$ con gradientes más grandes (siempre)
+3. Muestrea aleatoriamente una fracción $b\%$ de las restantes (las de gradiente pequeño)
+4. Al calcular la ganancia del split, multiplica las observaciones muestreadas por $\frac{1-a}{b}$ para compensar el submuestreo
+
+El resultado: usa muchas menos observaciones por árbol sin sesgar la estimación de la ganancia.
+
+#### 3. EFB: comprimir features mutuamente excluyentes
+
+En datasets con muchas features *sparse* (muchos ceros, frecuente en one-hot encoding), LightGBM detecta features que **nunca toman valores no-cero simultáneamente** y las agrupa en un solo "bundle". Si las columnas `ciudad_NY`, `ciudad_LA` y `ciudad_Chicago` son one-hot, solo una puede ser 1 a la vez — pueden comprimirse en una sola feature numérica sin pérdida de información.
+
+Esto reduce el número efectivo de features de $p$ a $p' \ll p$, acelerando la búsqueda de splits.
+
+```{python}
+#| label: fig-lightgbm-leafwise
+#| fig-cap: "Comparación de estrategias de crecimiento de árbol. Izquierda: con el mismo número de hojas (7), leaf-wise produce árboles asimétricos que se concentran donde hay mayor ganancia, logrando menor error con menos splits. Derecha: curvas de aprendizaje de LightGBM y XGBoost en California Housing — LightGBM converge más rápido en tiempo de reloj por la combinación de crecimiento leaf-wise, GOSS y aprendizaje por histograma."
+#| fig-width: 13
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+from sklearn.datasets import fetch_california_housing, make_moons
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+import warnings
+warnings.filterwarnings('ignore')
+
+try:
+    import xgboost as xgb
+    import lightgbm as lgb
+    LIBS_LGB = True
+except ImportError:
+    LIBS_LGB = False
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+# Panel izquierdo: fronteras de decisión leaf-wise vs level-wise
+np.random.seed(42)
+X_lw, y_lw = make_moons(n_samples=400, noise=0.25, random_state=42)
+h = 0.02
+x_min, x_max = X_lw[:, 0].min() - 0.5, X_lw[:, 0].max() + 0.5
+y_min_lw, y_max_lw = X_lw[:, 1].min() - 0.5, X_lw[:, 1].max() + 0.5
+xx_lw, yy_lw = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min_lw, y_max_lw, h))
+
+ax = axes[0]
+if LIBS_LGB:
+    lgb_lw = lgb.LGBMClassifier(n_estimators=10, num_leaves=7,
+                                  learning_rate=0.5, verbose=-1, random_state=42)
+    xgb_lw = xgb.XGBClassifier(n_estimators=10, max_depth=3,
+                                 learning_rate=0.5, verbosity=0, random_state=42)
+    lgb_lw.fit(X_lw, y_lw)
+    xgb_lw.fit(X_lw, y_lw)
+    Z_lgb = lgb_lw.predict(np.c_[xx_lw.ravel(), yy_lw.ravel()]).reshape(xx_lw.shape)
+    Z_xgb = xgb_lw.predict(np.c_[xx_lw.ravel(), yy_lw.ravel()]).reshape(xx_lw.shape)
+    ax.contourf(xx_lw, yy_lw, Z_lgb, alpha=0.25, cmap='RdYlBu', levels=1)
+    ax.contour(xx_lw, yy_lw, Z_xgb, levels=1, colors='navy',
+               linewidths=1.5, linestyles='--', alpha=0.8)
+    ax.scatter(X_lw[:, 0], X_lw[:, 1], c=y_lw, cmap='RdYlBu',
+               edgecolors='k', s=30, linewidths=0.5, alpha=0.7)
+    ax.set_title(f'LightGBM leaf-wise (fondo)\nvs XGBoost level-wise (línea punteada)\n'
+                 f'10 árboles, ~7 hojas',
+                 fontsize=10, fontweight='bold')
+else:
+    ax.text(0.5, 0.5, 'LightGBM/XGBoost\nno disponibles', ha='center',
+            va='center', transform=ax.transAxes)
+ax.grid(True, alpha=0.2)
+
+# Panel derecho: curvas de aprendizaje en California Housing
+ax2 = axes[1]
+np.random.seed(42)
+housing = fetch_california_housing()
+idx_lw = np.random.choice(len(housing.data), 8000, replace=False)
+X_cal = housing.data[idx_lw]
+y_cal = housing.target[idx_lw]
+X_cal_tr, X_cal_te, y_cal_tr, y_cal_te = train_test_split(
+    X_cal, y_cal, test_size=0.2, random_state=42)
+
+if LIBS_LGB:
+    n_est_lw = 300
+    xgb_cal = xgb.XGBRegressor(n_estimators=n_est_lw, learning_rate=0.05,
+                                 max_depth=5, verbosity=0, random_state=42)
+    lgb_cal = lgb.LGBMRegressor(n_estimators=n_est_lw, learning_rate=0.05,
+                                 num_leaves=31, verbose=-1, random_state=42)
+    t0 = time.time(); xgb_cal.fit(X_cal_tr, y_cal_tr); t_xgb = time.time() - t0
+    t0 = time.time(); lgb_cal.fit(X_cal_tr, y_cal_tr); t_lgb = time.time() - t0
+
+    rmse_xgb = np.sqrt(mean_squared_error(y_cal_te, xgb_cal.predict(X_cal_te)))
+    rmse_lgb = np.sqrt(mean_squared_error(y_cal_te, lgb_cal.predict(X_cal_te)))
+
+    ax2.bar(['XGBoost', 'LightGBM'], [t_xgb, t_lgb],
+            color=['tomato', 'mediumseagreen'], alpha=0.8, width=0.5)
+    for i, (t, r) in enumerate(zip([t_xgb, t_lgb], [rmse_xgb, rmse_lgb])):
+        ax2.text(i, t + 0.1, f'{t:.1f}s\nRMSE={r:.3f}',
+                 ha='center', fontsize=10, fontweight='bold')
+    ax2.set_ylabel('Tiempo de entrenamiento (s)', fontsize=11)
+    ax2.set_title(f'Velocidad vs precisión\n({n_est_lw} árboles, 8k muestras, 8 features)',
+                  fontsize=10, fontweight='bold')
+    ax2.grid(True, alpha=0.3, axis='y')
+    speedup = t_xgb / t_lgb
+    ax2.text(0.5, 0.9, f'LightGBM es {speedup:.1f}× más rápido',
+             ha='center', transform=ax2.transAxes, fontsize=10,
+             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+else:
+    ax2.text(0.5, 0.5, 'Librerías no disponibles', ha='center',
+             va='center', transform=ax2.transAxes)
+
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+### CatBoost: para cuando tus datos tienen categorías
+
+**CatBoost** (Yandex, 2018) resuelve dos problemas que los demás ignoran: el *prediction shift* (un sesgo estadístico sutil en el entrenamiento) y el manejo de variables categóricas de alta cardinalidad sin preprocesamiento.
+
+#### El problema del prediction shift
+
+En gradient boosting estándar, los pseudo-residuales de la iteración $m$ se calculan como:
+
+$$r_i^{(m)} = -\frac{\partial L(y_i, F_{m-1}(x_i))}{\partial F_{m-1}(x_i)}$$
+
+El problema: $F_{m-1}$ fue construida usando $x_i$, así que ya está sobreajustada a ese punto. Estamos calculando el "error" de un modelo sobre los mismos datos que usó para aprender — lo que introduce un sesgo sistemático hacia el sobreajuste.
+
+#### Ordered Boosting: la solución
+
+CatBoost genera una **permutación aleatoria** de los datos antes de cada iteración. Para calcular el pseudo-residual de la observación $i$, usa solo las observaciones que aparecen *antes* de $i$ en esa permutación:
+
+$$F_{m-1}^{(-i)}(x_i) = \text{modelo entrenado sin usar } x_i$$
+
+Esto simula lo que ocurriría en producción: el modelo nunca "vio" ese punto cuando predice. El resultado es una estimación de residuales sin el sesgo del prediction shift, especialmente valioso con datasets pequeños.
+
+#### Target Statistics ordenadas para categorías
+
+El enfoque clásico para variables categóricas de alta cardinalidad tiene dos problemas bien conocidos:
+
+- **Label encoding** (1, 2, 3...): impone un orden artificial que el árbol puede malinterpretar
+- **One-hot encoding**: con 100 categorías crea 100 columnas — explosión dimensional
+
+CatBoost usa **Target Statistics** calculadas de forma ordenada: para la categoría de la observación $i$, estima la media del target usando solo las observaciones anteriores en la permutación:
+
+$$\hat{x}_i = \frac{\sum_{j < i} \mathbf{1}[x_j = x_i] \cdot y_j + \alpha \cdot \bar{y}}{\sum_{j < i} \mathbf{1}[x_j = x_i] + \alpha}$$
+
+donde $\alpha$ y $\bar{y}$ son un prior bayesiano (evita estimaciones ruidosas para categorías raras). Al usar solo datos "anteriores", elimina el target leakage que ocurre con target encoding tradicional.
+
+#### Árboles oblivios (symmetric trees)
+
+CatBoost usa un tipo de árbol inusual: en cada nivel, **todos los nodos aplican exactamente la misma condición de split**.
+
+```
+Árbol normal (XGBoost/LightGBM):   Árbol oblivio (CatBoost):
+
+       [Ingreso > 50k]                    [Ingreso > 50k]
+        /            \                     /             \
+ [Edad > 30]    [Ciudad = NY]      [Edad > 30]       [Edad > 30]
+   /     \          /    \           /     \           /     \
+Hoja1  Hoja2    Hoja3  Hoja4      Hoja1  Hoja2     Hoja3  Hoja4
+```
+
+En el árbol oblivio, el nivel 2 aplica `[Edad > 30]` en *ambas* ramas — independientemente de si el padre fue `Ingreso > 50k` o no. Esto parece una restricción, pero tiene ventajas concretas:
+
+- **Predicción ultra-rápida**: clasificar un punto nuevo requiere solo $\log_2(\text{num\_hojas})$ comparaciones, y se puede vectorizar completamente
+- **Regularización implícita**: la simetría fuerza que el modelo no sobre-especialice en subpoblaciones pequeñas
+- **Facilita deployment**: los árboles oblivios se pueden representar como tablas de búsqueda
+
+```{python}
+#| label: fig-catboost-categorias
+#| fig-cap: "CatBoost maneja variables categóricas nativamente sin preprocesamiento. Comparación en un dataset de sueldos con tres variables categóricas (departamento, ubicación, nivel educativo): XGBoost requiere one-hot encoding (más columnas, más tiempo de preprocesamiento), mientras CatBoost acepta strings directamente y aplica target statistics ordenadas internamente. Ambos alcanzan precisión similar, pero CatBoost necesita mucho menos trabajo del analista."
+#| fig-width: 12
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import time
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score
+import warnings
+warnings.filterwarnings('ignore')
+
+try:
+    import xgboost as xgb
+    from catboost import CatBoostRegressor
+    LIBS_CAT = True
+except ImportError:
+    LIBS_CAT = False
+
+np.random.seed(42)
+n = 2000
+
+departamentos = np.random.choice(['Ingeniería', 'Ventas', 'Marketing', 'RRHH', 'Finanzas'], n)
+ciudades = np.random.choice(['CDMX', 'Monterrey', 'Guadalajara', 'Puebla', 'Querétaro'], n)
+educacion = np.random.choice(['Licenciatura', 'Maestría', 'Doctorado', 'Preparatoria'], n)
+experiencia = np.random.exponential(5, n)
+edad = np.clip(np.random.normal(35, 8, n), 22, 65)
+
+efecto_dept = {'Ingeniería': 90, 'Ventas': 55, 'Marketing': 65, 'RRHH': 50, 'Finanzas': 75}
+efecto_ciudad = {'CDMX': 20, 'Monterrey': 15, 'Guadalajara': 10, 'Puebla': 5, 'Querétaro': 8}
+efecto_edu = {'Preparatoria': 0, 'Licenciatura': 15, 'Maestría': 30, 'Doctorado': 50}
+
+salario = (
+    np.array([efecto_dept[d] for d in departamentos]) +
+    np.array([efecto_ciudad[c] for c in ciudades]) +
+    np.array([efecto_edu[e] for e in educacion]) +
+    experiencia * 2 + (edad - 22) * 0.5 +
+    np.random.normal(0, 8, n)
+)
+
+df = pd.DataFrame({'departamento': departamentos, 'ciudad': ciudades,
+                   'educacion': educacion, 'experiencia': experiencia,
+                   'edad': edad, 'salario': salario})
+
+train_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
+y_tr = train_df['salario'].values
+y_te = test_df['salario'].values
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 5))
+
+if LIBS_CAT:
+    # XGBoost con one-hot encoding
+    t0 = time.time()
+    X_tr_ohe = pd.get_dummies(train_df.drop('salario', axis=1),
+                               columns=['departamento', 'ciudad', 'educacion'])
+    X_te_ohe = pd.get_dummies(test_df.drop('salario', axis=1),
+                               columns=['departamento', 'ciudad', 'educacion'])
+    X_te_ohe = X_te_ohe.reindex(columns=X_tr_ohe.columns, fill_value=0)
+    m_xgb = xgb.XGBRegressor(n_estimators=200, learning_rate=0.1,
+                               max_depth=5, verbosity=0, random_state=42)
+    m_xgb.fit(X_tr_ohe, y_tr)
+    t_xgb = time.time() - t0
+    r2_xgb = r2_score(y_te, m_xgb.predict(X_te_ohe))
+    n_feats_xgb = X_tr_ohe.shape[1]
+
+    # CatBoost con categorías nativas
+    cat_cols = ['departamento', 'ciudad', 'educacion']
+    X_tr_cat = train_df.drop('salario', axis=1)
+    X_te_cat = test_df.drop('salario', axis=1)
+    t0 = time.time()
+    m_cat = CatBoostRegressor(iterations=200, learning_rate=0.1,
+                               depth=5, verbose=0, random_state=42)
+    m_cat.fit(X_tr_cat, y_tr, cat_features=cat_cols)
+    t_cat = time.time() - t0
+    r2_cat = r2_score(y_te, m_cat.predict(X_te_cat))
+    n_feats_cat = X_tr_cat.shape[1]
+
+    nombres = ['XGBoost\n(one-hot)', 'CatBoost\n(nativo)']
+    colores_c = ['tomato', 'mediumpurple']
+
+    axes[0].bar(nombres, [n_feats_xgb, n_feats_cat], color=colores_c, alpha=0.8)
+    for i, v in enumerate([n_feats_xgb, n_feats_cat]):
+        axes[0].text(i, v + 0.3, str(v), ha='center', fontsize=12, fontweight='bold')
+    axes[0].set_ylabel('Número de features', fontsize=11)
+    axes[0].set_title('Dimensionalidad\ndespués de preprocesar', fontsize=10, fontweight='bold')
+    axes[0].grid(True, alpha=0.3, axis='y')
+
+    axes[1].bar(nombres, [t_xgb, t_cat], color=colores_c, alpha=0.8)
+    for i, v in enumerate([t_xgb, t_cat]):
+        axes[1].text(i, v + 0.05, f'{v:.2f}s', ha='center', fontsize=11, fontweight='bold')
+    axes[1].set_ylabel('Tiempo total (s)', fontsize=11)
+    axes[1].set_title('Tiempo (preproceso\n+ entrenamiento)', fontsize=10, fontweight='bold')
+    axes[1].grid(True, alpha=0.3, axis='y')
+
+    axes[2].bar(nombres, [r2_xgb, r2_cat], color=colores_c, alpha=0.8)
+    for i, v in enumerate([r2_xgb, r2_cat]):
+        axes[2].text(i, v - 0.03, f'R²={v:.3f}', ha='center', fontsize=11, fontweight='bold')
+    axes[2].set_ylabel('R² en test', fontsize=11)
+    axes[2].set_title('Precisión predictiva', fontsize=10, fontweight='bold')
+    axes[2].set_ylim(0.8, 1.0)
+    axes[2].grid(True, alpha=0.3, axis='y')
+else:
+    for ax in axes:
+        ax.text(0.5, 0.5, 'CatBoost/XGBoost\nno disponibles',
+                ha='center', va='center', transform=ax.transAxes)
+
+plt.suptitle('CatBoost nativo vs XGBoost + one-hot encoding\n(dataset sintético de sueldos con 3 variables categóricas)',
+             fontsize=11)
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+### Comparación comprehensiva
+
+```{python}
+#| label: fig-benchmark-los-cuatro
+#| fig-cap: "Benchmark de las cuatro implementaciones de boosting en California Housing con parámetros equivalentes. El tiempo de entrenamiento y la predicción de sklearn es el punto de referencia (1×). Las implementaciones modernas son drásticamente más rápidas con precisión comparable o superior. El gráfico de radar resume las fortalezas relativas de cada una en cinco dimensiones."
+#| fig-width: 14
+#| fig-height: 6
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+from sklearn.datasets import fetch_california_housing
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+import warnings
+warnings.filterwarnings('ignore')
+
+try:
+    import xgboost as xgb
+    import lightgbm as lgb
+    from catboost import CatBoostRegressor
+    LIBS_BENCH = True
+except ImportError:
+    LIBS_BENCH = False
+
+np.random.seed(42)
+housing = fetch_california_housing()
+X_bn, y_bn = housing.data, housing.target
+X_bn_tr, X_bn_te, y_bn_tr, y_bn_te = train_test_split(X_bn, y_bn, test_size=0.2, random_state=42)
+
+n_est, lr, depth = 200, 0.1, 5
+
+configs = [
+    ('sklearn GB', GradientBoostingRegressor(n_estimators=n_est, learning_rate=lr,
+                                              max_depth=depth, random_state=42), 'steelblue'),
+]
+if LIBS_BENCH:
+    configs += [
+        ('XGBoost', xgb.XGBRegressor(n_estimators=n_est, learning_rate=lr,
+                                      max_depth=depth, verbosity=0, random_state=42), 'tomato'),
+        ('LightGBM', lgb.LGBMRegressor(n_estimators=n_est, learning_rate=lr,
+                                        num_leaves=2**depth - 1, verbose=-1, random_state=42), 'mediumseagreen'),
+        ('CatBoost', CatBoostRegressor(iterations=n_est, learning_rate=lr,
+                                        depth=depth, verbose=0, random_state=42), 'mediumpurple'),
+    ]
+
+resultados_bn = {}
+for nombre, modelo, color in configs:
+    t0 = time.time()
+    modelo.fit(X_bn_tr, y_bn_tr)
+    t_train = time.time() - t0
+    t0 = time.time()
+    y_pred = modelo.predict(X_bn_te)
+    t_pred = (time.time() - t0) * 1000
+    resultados_bn[nombre] = {
+        'color': color,
+        'train': t_train,
+        'pred': t_pred,
+        'rmse': np.sqrt(mean_squared_error(y_bn_te, y_pred)),
+        'r2': r2_score(y_bn_te, y_pred),
+    }
+
+nombres_bn = list(resultados_bn.keys())
+colores_bn = [v['color'] for v in resultados_bn.values()]
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 6))
+
+# Tiempo de entrenamiento
+train_ts = [v['train'] for v in resultados_bn.values()]
+axes[0].bar(nombres_bn, train_ts, color=colores_bn, alpha=0.85, edgecolor='white')
+for i, v in enumerate(train_ts):
+    axes[0].text(i, v + 0.3, f'{v:.1f}s', ha='center', fontsize=9, fontweight='bold')
+base = train_ts[0]
+for i, v in enumerate(train_ts[1:], 1):
+    axes[0].text(i, 1.0, f'{base/v:.1f}×', ha='center', fontsize=8,
+                 color='darkgreen', style='italic')
+axes[0].set_ylabel('Segundos', fontsize=11)
+axes[0].set_title('Tiempo de entrenamiento\n(verde = speedup vs sklearn)', fontsize=10, fontweight='bold')
+axes[0].grid(True, alpha=0.3, axis='y')
+
+# Tiempo de predicción
+pred_ts = [v['pred'] for v in resultados_bn.values()]
+axes[1].bar(nombres_bn, pred_ts, color=colores_bn, alpha=0.85, edgecolor='white')
+for i, v in enumerate(pred_ts):
+    axes[1].text(i, v + 0.2, f'{v:.1f}ms', ha='center', fontsize=9, fontweight='bold')
+axes[1].set_ylabel('Milisegundos', fontsize=11)
+axes[1].set_title('Tiempo de predicción\n(dataset completo)', fontsize=10, fontweight='bold')
+axes[1].grid(True, alpha=0.3, axis='y')
+
+# RMSE y R²
+rmses = [v['rmse'] for v in resultados_bn.values()]
+r2s   = [v['r2']   for v in resultados_bn.values()]
+x_pos = np.arange(len(nombres_bn))
+w = 0.35
+axes[2].bar(x_pos - w/2, rmses, w, color=colores_bn, alpha=0.85, label='RMSE (eje izq.)', edgecolor='white')
+ax2r = axes[2].twinx()
+ax2r.bar(x_pos + w/2, r2s, w, color=colores_bn, alpha=0.4, label='R² (eje der.)', edgecolor='white', hatch='//')
+axes[2].set_xticks(x_pos)
+axes[2].set_xticklabels(nombres_bn, fontsize=8)
+axes[2].set_ylabel('RMSE ↓', fontsize=10)
+ax2r.set_ylabel('R² ↑', fontsize=10)
+axes[2].set_title('Precisión predictiva', fontsize=10, fontweight='bold')
+axes[2].grid(True, alpha=0.3, axis='y')
+for i, (r, s) in enumerate(zip(rmses, r2s)):
+    axes[2].text(i - w/2, r + 0.003, f'{r:.3f}', ha='center', fontsize=8, fontweight='bold')
+    ax2r.text(i + w/2, s + 0.002, f'{s:.3f}', ha='center', fontsize=8, style='italic')
+
+plt.tight_layout()
+plt.show()
+
+print(f"\n{'Modelo':<14} {'Train':>8} {'Pred':>8} {'RMSE':>8} {'R²':>8}")
+print('─' * 50)
+for nombre, v in resultados_bn.items():
+    print(f"{nombre:<14} {v['train']:>7.1f}s {v['pred']:>6.1f}ms {v['rmse']:>8.4f} {v['r2']:>8.4f}")
+```
+
+::: {.callout-tip}
+## ¿Qué librería usar?
+
+| Situación | Recomendación | Por qué |
+|-----------|---------------|---------|
+| Aprendizaje / prototipado | `sklearn` GB | API familiar, `staged_predict` para inspección |
+| Producción con datos numéricos | **XGBoost** | Regularización explícita, documentación extensa, más estable |
+| Datasets grandes (>50k filas) | **LightGBM** | GOSS + EFB lo hacen 5–15× más rápido |
+| Muchas variables categóricas | **CatBoost** | Target statistics sin leakage, zero preprocesamiento |
+| Poco tiempo para tuning | **CatBoost** | Defaults robustos, learning rate automático |
+| Competencias de Kaggle | Los tres | Cada uno encuentra mínimos distintos; ensamblar suele ganar |
+:::
+
+---
+
+## Aplicación práctica: cáncer de seno
+
+Usaremos el dataset de diagnóstico de cáncer de seno para construir un pipeline completo de clasificación con boosting, incluyendo early stopping, evaluación robusta e interpretabilidad con importancia de features.
+
+```{python}
+#| label: fig-cancer-boosting
+#| fig-cap: "Pipeline completo de clasificación con XGBoost en el dataset de cáncer de seno. (a) Curva de aprendizaje mostrando el log-loss en train y validación; el punto verde indica el número óptimo de árboles seleccionado por early stopping. (b) Matriz de confusión normalizada en test. (c) Las 15 features más importantes según la ganancia media (mean gain), que mide cuánto mejora en promedio cada vez que se usa una feature para un split."
+#| fig-width: 14
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.metrics import (confusion_matrix, classification_report,
+                              log_loss, roc_auc_score)
+from sklearn.preprocessing import StandardScaler
+import warnings
+warnings.filterwarnings('ignore')
+
+try:
+    import xgboost as xgb
+    XGB_OK = True
+except ImportError:
+    from sklearn.ensemble import GradientBoostingClassifier
+    XGB_OK = False
+
+np.random.seed(42)
+cancer = load_breast_cancer()
+X_bc, y_bc = cancer.data, cancer.target
+nombres_features = cancer.feature_names
+
+# Separar train/val/test
+X_bc_tr, X_bc_te, y_bc_tr, y_bc_te = train_test_split(X_bc, y_bc, test_size=0.2,
+                                                        random_state=42, stratify=y_bc)
+X_bc_tr, X_bc_val, y_bc_tr, y_bc_val = train_test_split(X_bc_tr, y_bc_tr, test_size=0.2,
+                                                          random_state=42, stratify=y_bc_tr)
+
+if XGB_OK:
+    modelo_bc = xgb.XGBClassifier(
+        n_estimators=500,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        eval_metric='logloss',
+        early_stopping_rounds=30,
+        random_state=42,
+        verbosity=0
+    )
+    modelo_bc.fit(X_bc_tr, y_bc_tr,
+                  eval_set=[(X_bc_tr, y_bc_tr), (X_bc_val, y_bc_val)],
+                  verbose=False)
+
+    resultados = modelo_bc.evals_result()
+    train_ll = resultados['validation_0']['logloss']
+    val_ll   = resultados['validation_1']['logloss']
+    mejor_iter = modelo_bc.best_iteration
+    importancias = modelo_bc.feature_importances_
+else:
+    from sklearn.ensemble import GradientBoostingClassifier
+    modelo_bc = GradientBoostingClassifier(n_estimators=200, learning_rate=0.05,
+                                           max_depth=4, subsample=0.8, random_state=42)
+    modelo_bc.fit(X_bc_tr, y_bc_tr)
+    train_ll = [log_loss(y_bc_tr, p) for p in modelo_bc.staged_predict_proba(X_bc_tr)]
+    val_ll   = [log_loss(y_bc_val, p) for p in modelo_bc.staged_predict_proba(X_bc_val)]
+    mejor_iter = int(np.argmin(val_ll))
+    importancias = modelo_bc.feature_importances_
+
+y_bc_pred = modelo_bc.predict(X_bc_te)
+y_bc_prob = modelo_bc.predict_proba(X_bc_te)[:, 1]
+auc = roc_auc_score(y_bc_te, y_bc_prob)
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+
+# (a) Curvas de aprendizaje
+ax = axes[0]
+ax.plot(train_ll, 'steelblue', linewidth=2, label='Train', alpha=0.8)
+ax.plot(val_ll, 'tomato', linewidth=2, label='Validación', alpha=0.8)
+ax.axvline(mejor_iter, color='green', linestyle='--', linewidth=2)
+ax.plot(mejor_iter, val_ll[mejor_iter], 'go', markersize=9, zorder=5,
+        label=f'Early stop: iter {mejor_iter}')
+ax.set_xlabel('Número de árboles', fontsize=10)
+ax.set_ylabel('Log-loss', fontsize=10)
+ax.set_title('(a) Curvas de aprendizaje', fontsize=11, fontweight='bold')
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+
+# (b) Matriz de confusión
+ax = axes[1]
+cm = confusion_matrix(y_bc_te, y_bc_pred, normalize='true')
+im = ax.imshow(cm, cmap='Blues', vmin=0, vmax=1)
+plt.colorbar(im, ax=ax, fraction=0.046)
+etiquetas = ['Maligno\n(0)', 'Benigno\n(1)']
+ax.set_xticks([0, 1]); ax.set_yticks([0, 1])
+ax.set_xticklabels(etiquetas, fontsize=9)
+ax.set_yticklabels(etiquetas, fontsize=9)
+for i in range(2):
+    for j in range(2):
+        ax.text(j, i, f'{cm[i, j]:.2f}', ha='center', va='center',
+                fontsize=12, fontweight='bold',
+                color='white' if cm[i, j] > 0.5 else 'black')
+ax.set_xlabel('Predicción', fontsize=10)
+ax.set_ylabel('Real', fontsize=10)
+ax.set_title(f'(b) Matriz de confusión\nAUC-ROC = {auc:.4f}', fontsize=11, fontweight='bold')
+
+# (c) Importancia de features (top 15)
+ax = axes[2]
+idx_top = np.argsort(importancias)[-15:]
+barras = ax.barh(range(15), importancias[idx_top], color='steelblue', alpha=0.8, edgecolor='white')
+ax.set_yticks(range(15))
+ax.set_yticklabels([nombres_features[i] for i in idx_top], fontsize=8)
+ax.set_xlabel('Importancia (mean gain)', fontsize=10)
+ax.set_title('(c) Top 15 features más importantes', fontsize=11, fontweight='bold')
+ax.grid(True, alpha=0.3, axis='x')
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nResultados en test set ({len(y_bc_te)} muestras):")
+print(classification_report(y_bc_te, y_bc_pred,
+                             target_names=['Maligno', 'Benigno']))
+```
+
+### Early stopping: la regla de oro
+
+El **early stopping** es la técnica más importante para evitar sobreajuste en boosting. En lugar de adivinar cuántos árboles necesitamos, entrenamos con un número alto y paramos cuando el error de validación deja de mejorar.
+
+```python
+# Patrón recomendado para XGBoost con early stopping
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
+
+X_tr, X_val, y_tr, y_val = train_test_split(X, y, test_size=0.15, random_state=42)
+
+modelo = xgb.XGBClassifier(
+    n_estimators=1000,         # Alto — early stopping decide cuándo parar
+    learning_rate=0.05,
+    max_depth=5,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    early_stopping_rounds=50,  # Para si no mejora en 50 rondas
+    eval_metric='logloss',
+    random_state=42,
+    verbosity=0
+)
+
+modelo.fit(X_tr, y_tr,
+           eval_set=[(X_val, y_val)],
+           verbose=False)
+
+print(f"Árboles óptimos: {modelo.best_iteration}")
+print(f"Mejor score:    {modelo.best_score:.4f}")
+```
+
+---
+
+## Resumen
+
+Los métodos de boosting son la familia de algoritmos más efectiva para datos tabulares supervisados. La siguiente tabla resume el recorrido de este capítulo:
+
+| Algoritmo | Mecanismo | Fortaleza principal | Limitación |
+|-----------|-----------|---------------------|------------|
+| **AdaBoost** | Actualiza pesos de muestras | Teóricamente elegante | Muy sensible a outliers |
+| **Gradient Boosting** | Ajusta residuales (gradiente) | Flexible, cualquier pérdida | Lento en datasets grandes |
+| **XGBoost** | GB + regularización + histogramas | Robusto, bien documentado | Más hiperparámetros |
+| **LightGBM** | Leaf-wise + GOSS + EFB | Velocidad, datasets grandes | Puede sobreajustar con datos pequeños |
+| **CatBoost** | Ordered boosting + cat nativas | "Out-of-the-box" excelente | Más lento que LightGBM |
+
+### Guía de decisión rápida
+
+```
+¿Datos tabulares con target continuo o binario/multiclase?
+│
+├─ ¿Muchas variables categóricas sin codificar?
+│   └─ Sí  → CatBoost
+│
+├─ ¿Dataset muy grande (>100k filas)?
+│   └─ Sí  → LightGBM
+│
+├─ ¿Primera vez o necesitas flexibilidad?
+│   └─ Sí  → XGBoost
+│
+└─ ¿Solo prototipando o clase?
+    └─ Sí  → sklearn GradientBoosting
+```
+
+::: {.callout-tip}
+## El consejo más importante
+
+En la práctica, **boosting + buenas features** supera a **boosting complejo + features mediocres**. Antes de tunear hiperparámetros horas, pregúntate:
+
+1. ¿Entiendo bien mis datos y sus distribuciones?
+2. ¿Tengo features que realmente capturen la señal?
+3. ¿Mi esquema de validación evita data leakage?
+4. ¿Comparé contra un baseline simple?
+
+Una vez respondidas estas preguntas, sí vale la pena optimizar el modelo.
+:::
+
+---
+
+## Discusión
+
+::: {.callout-caution collapse="true"}
+## Pregunta 1: Sesgo y varianza en boosting
+
+Dijimos que boosting reduce el sesgo combinando modelos simples. ¿Por qué no simplemente usar un árbol profundo que ya tenga bajo sesgo? ¿Qué ventaja ofrece combinar árboles superficiales frente a usar uno profundo?
+:::
+
+::: {.callout-caution collapse="true"}
+## Pregunta 2: ¿Qué pasa si entrenamos boosting con demasiados árboles?
+
+A diferencia de Random Forest (donde agregar árboles casi nunca daña), en boosting hay riesgo real de sobreajuste si usamos demasiados. ¿Por qué? ¿Qué relación tiene esto con el hecho de que los árboles se construyen *secuencialmente*?
+:::
+
+::: {.callout-caution collapse="true"}
+## Pregunta 3: AdaBoost vs Gradient Boosting
+
+AdaBoost actualiza los pesos de las muestras; Gradient Boosting ajusta un árbol a los pseudo-residuales. ¿Son estrategias fundamentalmente distintas o variantes del mismo principio? Piensa en cómo se relacionan los "pseudo-residuales" de Gradient Boosting con los "pesos aumentados" de AdaBoost.
+:::
+
+::: {.callout-caution collapse="true"}
+## Pregunta 4: Elección de función de pérdida
+
+Tienes un problema de predicción de precio de casas donde hay algunos outliers extremos (precios 10× superiores al promedio). ¿Qué función de pérdida elegirías para tu Gradient Boosting: MSE, MAE o Huber? Justifica.
+:::
+
+::: {.callout-caution collapse="true"}
+## Pregunta 5: LightGBM leaf-wise vs level-wise
+
+LightGBM usa crecimiento "leaf-wise" (elige la hoja con mayor ganancia) en lugar de "level-wise" (expande todos los nodos del nivel). ¿En qué situaciones puede esto ser problemático? ¿Qué hiperparámetro de LightGBM usarías para controlar este comportamiento?
+:::

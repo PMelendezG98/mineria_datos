@@ -17,6 +17,8 @@ book:
     - 04_evaluacion_modelos.md
     - 05_arboles.qmd
     - 06_bosques.qmd
+    - 07_boosting.qmd
+    - proyecto_final.md
   open-graph: true
 
 bibliography: references.bib
