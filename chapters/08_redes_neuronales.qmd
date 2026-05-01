@@ -1,0 +1,1128 @@
+---
+format:
+  html:
+    code-fold: true
+execute:
+  warning: false
+---
+
+# Redes Neuronales {#sec-redes-neuronales}
+
+```{python}
+#| include: false
+import warnings
+warnings.filterwarnings('ignore')
+```
+
+## Motivación: cuando los árboles no alcanzan
+
+En los capítulos anteriores construimos modelos cada vez más poderosos. Pasamos de un árbol individual (alta varianza) a Random Forests (promedio de árboles) y a Gradient Boosting (corrección secuencial de errores). Estos métodos dominan los datos tabulares estructurados y siguen siendo la primera línea en la industria.
+
+Sin embargo, hay categorías de problemas donde estos modelos tienen limitaciones estructurales:
+
+- **Imágenes**: ¿cómo le dices a un árbol de decisión que la posición relativa de los píxeles importa?
+- **Texto**: ¿cómo capturas que "banco" significa cosas distintas en "banco de peces" y "banco financiero"?
+- **Series de tiempo largas**: ¿cómo modelas dependencias que ocurren con cientos de pasos de distancia?
+
+::: {.callout-note}
+## ¿Qué significa "deep learning"?
+
+*Deep learning* es simplemente el nombre popular para las redes neuronales con muchas capas (profundas). La profundidad le da al modelo la capacidad de aprender representaciones jerárquicas: primero bordes, luego formas, luego objetos. No es una tecnología diferente; es la misma arquitectura que estudiaremos aquí, escalada.
+:::
+
+---
+
+## El Perceptrón: la neurona artificial
+
+Todo empieza con la unidad más pequeña: el **perceptrón**. La idea es una analogía biológica: así como una neurona recibe señales eléctricas de otras neuronas, las procesa y decide si "dispara" o no, el perceptrón recibe números, los combina y produce una salida.
+
+### Anatomía del perceptrón
+
+Un perceptrón recibe varias entradas $x_1, x_2, \ldots, x_n$, le asigna un **peso** $w_i$ a cada una, suma todo (más un término independiente llamado **sesgo** o *bias* $b$), y pasa el resultado por una **función de activación**:
+
+$$\hat{y} = f\!\left(\sum_{i=1}^{n} w_i x_i + b\right)$$
+
+La intuición es directa: los pesos reflejan qué tan importante es cada señal de entrada. Si el peso de $x_1$ es alto, esa variable tiene mucha influencia en la salida. El sesgo le permite al modelo desplazarse (como el intercepto en regresión lineal). La función de activación convierte esa suma en algo útil: una probabilidad, un valor continuo, o una señal on/off.
+
+```{python}
+#| label: fig-perceptron
+#| fig-cap: "Anatomía de un perceptrón: entradas ponderadas, suma con sesgo, y función de activación que produce la salida."
+#| fig-width: 10
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import FancyArrowPatch
+
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.set_xlim(0, 10)
+ax.set_ylim(0, 6)
+ax.axis('off')
+
+entradas = [('x₁', 1.2, 5.0), ('x₂', 1.2, 3.0), ('x₃', 1.2, 1.0)]
+pesos    = ['w₁', 'w₂', 'w₃']
+
+# Nodo sumador
+cx_sum, cy_sum = 4.5, 3.0
+circulo_sum = plt.Circle((cx_sum, cy_sum), 0.55, color='#4C72B0', zorder=3)
+ax.add_patch(circulo_sum)
+ax.text(cx_sum, cy_sum, 'Σ', ha='center', va='center', fontsize=18, color='white', fontweight='bold', zorder=4)
+ax.text(cx_sum, cy_sum - 0.9, '+ bias b', ha='center', va='top', fontsize=9, color='#4C72B0')
+
+# Nodo activación
+cx_act, cy_act = 7.0, 3.0
+circulo_act = plt.Circle((cx_act, cy_act), 0.55, color='#DD8452', zorder=3)
+ax.add_patch(circulo_act)
+ax.text(cx_act, cy_act, 'f(·)', ha='center', va='center', fontsize=12, color='white', fontweight='bold', zorder=4)
+ax.text(cx_act, cy_act - 0.9, 'activación', ha='center', va='top', fontsize=9, color='#DD8452')
+
+# Entradas y flechas
+for (etiq, xi, yi), w in zip(entradas, pesos):
+    circ = plt.Circle((xi, yi), 0.35, color='#55A868', zorder=3)
+    ax.add_patch(circ)
+    ax.text(xi, yi, etiq, ha='center', va='center', fontsize=11, color='white', fontweight='bold', zorder=4)
+    ax.annotate('', xy=(cx_sum - 0.56, cy_sum + (yi - cy_sum) * 0.3),
+                xytext=(xi + 0.36, yi),
+                arrowprops=dict(arrowstyle='->', color='#333333', lw=1.5))
+    mx = (xi + cx_sum) / 2 - 0.2
+    my = (yi + cy_sum) / 2
+    ax.text(mx, my + 0.2, w, fontsize=10, color='#c0392b', fontstyle='italic')
+
+# Flecha sumador → activación
+ax.annotate('', xy=(cx_act - 0.56, cy_act), xytext=(cx_sum + 0.56, cy_sum),
+            arrowprops=dict(arrowstyle='->', color='#333333', lw=1.8))
+
+# Flecha salida
+ax.annotate('', xy=(9.2, 3.0), xytext=(cx_act + 0.56, cy_act),
+            arrowprops=dict(arrowstyle='->', color='#333333', lw=1.8))
+ax.text(9.3, 3.0, 'ŷ', ha='left', va='center', fontsize=14, color='black', fontweight='bold')
+
+ax.set_title('Anatomía de un Perceptrón', fontsize=14, pad=10)
+plt.tight_layout()
+plt.show()
+```
+
+### Funciones de activación
+
+La función de activación es el ingrediente que le da poder a las redes neuronales. Sin ella, apilar capas sería inútil: la suma de transformaciones lineales sigue siendo lineal. La activación introduce **no linealidad**, que es lo que permite a la red aprender patrones complejos.
+
+Las tres más comunes en la práctica:
+
+```{python}
+#| label: fig-activaciones
+#| fig-cap: "Las tres funciones de activación más usadas. ReLU es la predeterminada en capas ocultas; Sigmoid se usa en la capa de salida para clasificación binaria; Softmax para clasificación multiclase."
+#| fig-width: 12
+#| fig-height: 4
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+z = np.linspace(-4, 4, 300)
+
+sigmoid  = 1 / (1 + np.exp(-z))
+relu     = np.maximum(0, z)
+tanh_v   = np.tanh(z)
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+configs = [
+    (sigmoid, 'Sigmoid', '#4C72B0',
+     'Aplasta todo a [0,1]\nÚtil en salida (probabilidad)'),
+    (relu,    'ReLU',    '#DD8452',
+     'Cero si negativo, lineal si positivo\nMás usada en capas ocultas'),
+    (tanh_v,  'Tanh',    '#55A868',
+     'Aplasta a [-1, 1]\nAlternativa centrada a Sigmoid'),
+]
+
+for ax, (y, nombre, color, desc) in zip(axes, configs):
+    ax.plot(z, y, color=color, lw=2.5)
+    ax.axhline(0, color='gray', lw=0.8, ls='--')
+    ax.axvline(0, color='gray', lw=0.8, ls='--')
+    ax.set_title(nombre, fontsize=13, color=color, fontweight='bold')
+    ax.set_xlabel('z (entrada)', fontsize=10)
+    ax.set_ylabel('f(z)', fontsize=10)
+    ax.text(0.05, 0.05, desc, transform=ax.transAxes, fontsize=8.5,
+            va='bottom', color='#444444',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#f8f8f8', alpha=0.8))
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(-1.2, 1.2) if nombre == 'Tanh' else None
+
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+## La red feedforward (MLP)
+
+Un solo perceptrón tiene capacidad limitada. La magia ocurre cuando conectamos muchos en capas: esto es un **Perceptrón Multicapa** (*Multi-Layer Perceptron*, MLP), también llamado red feedforward porque la información fluye siempre hacia adelante, sin ciclos.
+
+### Arquitectura en capas
+
+Una red MLP tiene tres tipos de capas:
+
+| Capa | Descripción |
+|------|-------------|
+| **Capa de entrada** | Recibe las variables del problema ($x_1, \ldots, x_n$). No hay cálculo aquí, solo se pasan los datos. |
+| **Capas ocultas** | Una o más capas de perceptrones que aprenden representaciones intermedias. La profundidad y el ancho son hiperparámetros de diseño. |
+| **Capa de salida** | Produce la predicción final. Para clasificación binaria: 1 neurona con Sigmoid. Para regresión: 1 neurona lineal. |
+
+```{python}
+#| label: fig-mlp-arquitectura
+#| fig-cap: "Arquitectura de una red MLP con 3 entradas, dos capas ocultas (4 y 3 neuronas) y 1 salida. Cada línea es una conexión con su propio peso."
+#| fig-width: 11
+#| fig-height: 6
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+def dibujar_red(capas, colores, etiquetas_capa, ax):
+    max_n = max(capas)
+    posiciones = []
+
+    for c_idx, n in enumerate(capas):
+        xs = np.full(n, c_idx * 2.5)
+        ys = np.linspace(-(n - 1) / 2, (n - 1) / 2, n) * (max_n / max(n, 1)) * 0.9
+        posiciones.append(list(zip(xs, ys)))
+
+    # Conexiones
+    for c in range(len(capas) - 1):
+        for (x1, y1) in posiciones[c]:
+            for (x2, y2) in posiciones[c + 1]:
+                ax.plot([x1, x2], [y1, y2], color='#cccccc', lw=0.8, zorder=1)
+
+    # Nodos
+    for c_idx, (pos_capa, color) in enumerate(zip(posiciones, colores)):
+        for i, (x, y) in enumerate(pos_capa):
+            circ = plt.Circle((x, y), 0.3, color=color, zorder=3, ec='white', lw=1.5)
+            ax.add_patch(circ)
+
+    # Etiquetas de capa
+    for c_idx, (pos_capa, etiq) in enumerate(zip(posiciones, etiquetas_capa)):
+        x_c = pos_capa[0][0]
+        y_top = max(p[1] for p in pos_capa) + 0.65
+        ax.text(x_c, y_top, etiq, ha='center', va='bottom', fontsize=10,
+                fontweight='bold', color='#333333')
+
+    # Etiqueta número de neuronas
+    for c_idx, (pos_capa, n) in enumerate(zip(posiciones, capas)):
+        x_c = pos_capa[0][0]
+        y_bot = min(p[1] for p in pos_capa) - 0.65
+        ax.text(x_c, y_bot, f'{n} neurona{"s" if n > 1 else ""}',
+                ha='center', va='top', fontsize=8.5, color='#666666')
+
+fig, ax = plt.subplots(figsize=(11, 6))
+ax.set_aspect('equal')
+ax.axis('off')
+
+capas      = [3, 4, 3, 1]
+colores    = ['#55A868', '#4C72B0', '#4C72B0', '#DD8452']
+etiquetas  = ['Entrada', 'Oculta 1', 'Oculta 2', 'Salida']
+
+dibujar_red(capas, colores, etiquetas, ax)
+ax.set_xlim(-0.8, 8.3)
+ax.set_ylim(-3.2, 3.2)
+
+leyenda = [
+    mpatches.Patch(color='#55A868', label='Capa de entrada'),
+    mpatches.Patch(color='#4C72B0', label='Capas ocultas'),
+    mpatches.Patch(color='#DD8452', label='Capa de salida'),
+]
+ax.legend(handles=leyenda, loc='lower right', fontsize=9)
+ax.set_title('Arquitectura de una Red Feedforward (MLP)', fontsize=13, pad=12)
+
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-note}
+## ¿Cuántas capas y cuántas neuronas?
+
+No hay una respuesta única. Es un hiperparámetro que se ajusta con validación cruzada. Algunas heurísticas prácticas:
+
+- **Pocas neuronas**: el modelo puede tener sesgo (underfitting), no captura la complejidad.
+- **Muchas neuronas**: puede sobreajustar (overfitting) y tarda mucho en entrenar.
+- Para imágenes o texto: arquitecturas especializadas (CNN, Transformers) funcionan mucho mejor que un MLP genérico.
+:::
+
+---
+
+## Redes neuronales como aproximadores universales
+
+¿Por qué funcionan las redes neuronales? ¿Qué garantía teórica tenemos de que pueden resolver problemas complejos? La respuesta está en uno de los resultados más importantes de la teoría del aprendizaje automático.
+
+::: {.callout-note}
+## Teorema de Aproximación Universal
+
+Una red feedforward con **al menos una capa oculta**, un número suficiente de neuronas, y una función de activación no lineal puede aproximar **cualquier función continua** definida en un conjunto compacto de $\mathbb{R}^n$, con cualquier precisión deseada.
+
+Formalmente: para toda función continua $f: [0,1]^n \to \mathbb{R}$ y todo $\varepsilon > 0$, existe una red neuronal $\hat{f}$ tal que $\sup_x |f(x) - \hat{f}(x)| < \varepsilon$.
+:::
+
+La implicación práctica es poderosa: no necesitas saber de antemano qué forma matemática tiene el patrón que buscas. La red neuronal es una "navaja suiza" funcional: dado suficientes neuronas y datos, puede representarlo.
+
+### Intuición: construir funciones con neuronas
+
+La clave está en cómo la combinación de muchas funciones simples no lineales puede construir formas arbitrariamente complejas. Cada neurona con activación sigmoid, por ejemplo, produce una curva en forma de escalón suave. Sumando muchas de estas curvas escaladas y desplazadas, podemos aproximar cualquier función.
+
+```{python}
+#| label: fig-aproximacion-universal
+#| fig-cap: "Demostración del teorema de aproximación universal: una red MLP con una capa oculta aproxima funciones cada vez mejor al aumentar el número de neuronas."
+#| fig-width: 13
+#| fig-height: 4
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.neural_network import MLPRegressor
+
+np.random.seed(0)
+
+# Función objetivo con varias oscilaciones — difícil de capturar con pocas neuronas
+def f_objetivo(x):
+    return np.sin(2 * np.pi * x) + 0.5 * np.cos(6 * np.pi * x)
+
+X_train = np.linspace(0, 1, 200).reshape(-1, 1)
+y_train = f_objetivo(X_train.ravel()) + np.random.normal(0, 0.1, 200)
+
+X_plot = np.linspace(0, 1, 500).reshape(-1, 1)
+y_real = f_objetivo(X_plot.ravel())
+
+n_neuronas = [2, 8, 64]
+colores = ['#DD8452', '#4C72B0', '#55A868']
+
+fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharey=True)
+
+for ax, n, color in zip(axes, n_neuronas, colores):
+    # lbfgs: optimizador cuasi-Newton, converge al mejor mínimo alcanzable
+    # para cada capacidad — hace visible la diferencia entre 2, 8 y 64 neuronas
+    modelo = MLPRegressor(
+        hidden_layer_sizes=(n,),
+        activation='tanh',
+        solver='lbfgs',
+        max_iter=10000,
+        random_state=0,
+    )
+    modelo.fit(X_train, y_train)
+    y_pred = modelo.predict(X_plot)
+
+    ax.scatter(X_train, y_train, s=10, color='gray', alpha=0.4, zorder=2, label='Observaciones')
+    ax.plot(X_plot, y_real, 'k--', lw=2, label='Función real', zorder=3)
+    ax.plot(X_plot, y_pred, color=color, lw=2.5, label=f'Red ({n} neuronas)', zorder=4)
+    ax.fill_between(X_plot.ravel(), y_real, y_pred, alpha=0.15, color=color)
+
+    mse = np.mean((y_real - y_pred)**2)
+    ax.set_title(f'{n} neurona{"s" if n > 1 else ""} oculta{"s" if n > 1 else ""}\nMSE = {mse:.4f}',
+                 fontsize=11, color=color, fontweight='bold')
+    ax.set_xlabel('x', fontsize=10)
+    ax.set_ylabel('f(x)', fontsize=10)
+    ax.legend(fontsize=8.5)
+    ax.grid(True, alpha=0.3)
+
+plt.suptitle('Aproximación Universal: más neuronas → mejor aproximación', fontsize=13, y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+### Las neuronas aprenden "piezas" de la función
+
+Una forma de entender por qué funciona: cada neurona en la capa oculta aprende a "activarse" en una región diferente del espacio de entrada. La capa de salida luego combina linealmente estas activaciones parciales. Es como describir una función complicada como suma de funciones base más simples —igual que las series de Fourier descomponen señales en senos y cosenos.
+
+```{python}
+#| label: fig-activaciones-parciales
+#| fig-cap: "Cada neurona oculta aprende una respuesta local (arriba). La capa de salida combina estas respuestas para aproximar la función objetivo (abajo)."
+#| fig-width: 11
+#| fig-height: 6
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.neural_network import MLPRegressor
+
+np.random.seed(7)
+
+def f_objetivo(x):
+    return np.sin(2 * np.pi * x) + 0.5 * np.cos(6 * np.pi * x)
+
+X_train = np.linspace(0, 1, 200).reshape(-1, 1)
+y_train = f_objetivo(X_train.ravel()) + np.random.normal(0, 0.1, 200)
+
+modelo = MLPRegressor(hidden_layer_sizes=(8,), activation='tanh',
+                      solver='lbfgs', max_iter=10000, random_state=7)
+modelo.fit(X_train, y_train)
+
+X_plot = np.linspace(0, 1, 500).reshape(-1, 1)
+
+# Activaciones de la capa oculta
+W1, b1 = modelo.coefs_[0], modelo.intercepts_[0]
+W2, b2 = modelo.coefs_[1], modelo.intercepts_[1]
+
+Z1 = X_plot @ W1 + b1
+A1 = np.tanh(Z1)  # (500, 8)
+
+fig, axes = plt.subplots(2, 1, figsize=(11, 6))
+
+# Activaciones individuales
+ax = axes[0]
+for i in range(8):
+    ax.plot(X_plot, A1[:, i], lw=1.5, alpha=0.8, label=f'Neurona {i+1}')
+ax.set_title('Activaciones individuales de las 8 neuronas ocultas', fontsize=11)
+ax.set_ylabel('Activación (tanh)', fontsize=10)
+ax.legend(loc='upper right', fontsize=7.5, ncol=4)
+ax.grid(True, alpha=0.3)
+ax.axhline(0, color='black', lw=0.8)
+
+# Suma ponderada vs función real
+ax = axes[1]
+y_pred = modelo.predict(X_plot)
+y_real = f_objetivo(X_plot.ravel())
+ax.scatter(X_train, y_train, s=10, color='gray', alpha=0.4, zorder=2, label='Observaciones')
+ax.plot(X_plot, y_real, 'k--', lw=2, label='Función real')
+ax.plot(X_plot, y_pred, color='#4C72B0', lw=2.5, label='Combinación de neuronas (red)')
+ax.fill_between(X_plot.ravel(), y_real, y_pred, alpha=0.15, color='red', label='Error')
+ax.set_title('Combinación lineal de activaciones → aproximación de la función', fontsize=11)
+ax.set_xlabel('x', fontsize=10)
+ax.set_ylabel('f(x)', fontsize=10)
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-warning}
+## El teorema dice "puede", no "aprenderá automáticamente"
+
+El teorema de aproximación universal garantiza la **existencia** de una red que aproxima la función, pero no garantiza que el proceso de entrenamiento la encuentre. En la práctica:
+
+- Con pocos datos, la red puede sobreajustar aunque tenga capacidad suficiente.
+- Con un *learning rate* mal elegido, puede converger a un mínimo local pobre.
+- Con muy pocas neuronas, no tiene capacidad suficiente.
+
+El teorema es la justificación teórica de **por qué tiene sentido usar redes neuronales**. El arte del entrenamiento es cómo guiar al optimizador para que encuentre esa solución.
+:::
+
+---
+
+## ¿Cómo aprende la red?
+
+Aquí está el corazón de todo. Aprender, para una red neuronal, significa encontrar los valores de los pesos $w$ y sesgos $b$ que hacen que las predicciones sean lo más cercanas posible a los valores reales. El proceso tiene tres etapas que se repiten cíclicamente.
+
+### 1. Forward propagation: generar una predicción
+
+La propagación hacia adelante es el recorrido que hacen los datos desde la entrada hasta la salida. Es el cálculo de la predicción dado un conjunto de pesos.
+
+Para cada capa $l$:
+
+$$\mathbf{a}^{[l]} = f\!\left(W^{[l]} \mathbf{a}^{[l-1]} + \mathbf{b}^{[l]}\right)$$
+
+donde $\mathbf{a}^{[l]}$ son las activaciones de esa capa, $W^{[l]}$ son los pesos, y $f$ es la función de activación.
+
+En lenguaje de negocio: tomas un cliente con sus características, las pasas por todas las capas multiplicando por pesos, aplicas activaciones, y al final obtienes un número (por ejemplo, probabilidad de compra). Esto es **predicción**.
+
+### 2. Calcular el error: la función de pérdida
+
+Una vez que la red produce una predicción $\hat{y}$, se compara con el valor real $y$ mediante una **función de pérdida** (*loss function*). Es la misma idea que el error cuadrático en regresión o la entropía cruzada en clasificación.
+
+$$\mathcal{L}(\hat{y}, y) = \text{qué tan mal está la predicción}$$
+
+El objetivo del entrenamiento es minimizar esta pérdida. Pero con millones de parámetros, ¿cómo sabemos en qué dirección moverlos?
+
+### 3. Backpropagation: propagar el error hacia atrás
+
+La **retropropagación** (*backpropagation*) es el algoritmo que calcula, para cada peso en la red, cuánto "culpa" tiene en el error final. Formalmente, calcula el **gradiente** de la pérdida respecto a cada parámetro usando la regla de la cadena del cálculo diferencial.
+
+La intuición: si la predicción fue mala, ¿qué peso contribuyó más al error? ¿En qué dirección debemos ajustarlo para reducir el error la próxima vez?
+
+```{python}
+#| label: fig-backprop-intuicion
+#| fig-cap: "Intuición de backpropagation: el error se propaga hacia atrás, capa por capa, asignando responsabilidad a cada peso."
+#| fig-width: 11
+#| fig-height: 4.5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+fig, ax = plt.subplots(figsize=(11, 4.5))
+ax.set_xlim(0, 11)
+ax.set_ylim(0, 5)
+ax.axis('off')
+
+# Bloques de capas
+bloques = [
+    (1.0,  'Entrada\n(datos)', '#55A868'),
+    (3.5,  'Capa\nOculta 1', '#4C72B0'),
+    (6.0,  'Capa\nOculta 2', '#4C72B0'),
+    (8.5,  'Salida\n(ŷ)',     '#DD8452'),
+    (10.5, 'Pérdida\n𝓛',     '#c0392b'),
+]
+
+for x, etiq, color in bloques:
+    rect = mpatches.FancyBboxPatch((x - 0.7, 1.6), 1.4, 1.8,
+                                    boxstyle='round,pad=0.1',
+                                    linewidth=1.5, edgecolor='white',
+                                    facecolor=color, zorder=3, alpha=0.9)
+    ax.add_patch(rect)
+    ax.text(x, 2.5, etiq, ha='center', va='center', fontsize=9.5,
+            color='white', fontweight='bold', zorder=4)
+
+# Flechas forward (izquierda a derecha)
+xs = [b[0] for b in bloques]
+for i in range(len(xs) - 1):
+    ax.annotate('', xy=(xs[i+1] - 0.72, 2.85), xytext=(xs[i] + 0.72, 2.85),
+                arrowprops=dict(arrowstyle='->', color='#2ecc71', lw=2.0))
+
+# Flechas backward (derecha a izquierda)
+for i in range(len(xs) - 1, 0, -1):
+    ax.annotate('', xy=(xs[i-1] + 0.72, 2.15), xytext=(xs[i] - 0.72, 2.15),
+                arrowprops=dict(arrowstyle='->', color='#e74c3c', lw=2.0))
+
+# Leyenda tipo texto
+ax.text(5.5, 4.3, '→  Forward propagation (predicción)',
+        ha='center', fontsize=10, color='#2ecc71', fontweight='bold')
+ax.text(5.5, 3.85, '←  Backpropagation (gradiente del error)',
+        ha='center', fontsize=10, color='#e74c3c', fontweight='bold')
+
+ax.set_title('Forward Pass y Backpropagation', fontsize=13, pad=8)
+plt.tight_layout()
+plt.show()
+```
+
+### 4. Gradient Descent: actualizar los pesos
+
+Con los gradientes calculados, el algoritmo **descenso por gradiente** (*gradient descent*) ajusta cada peso en la dirección que reduce la pérdida:
+
+$$w \leftarrow w - \eta \cdot \frac{\partial \mathcal{L}}{\partial w}$$
+
+donde $\eta$ (eta) es el **learning rate**, que controla qué tan grandes son los pasos. Es el mismo hiperparámetro que vimos en boosting.
+
+La analogía clásica: imagina que estás en una montaña con los ojos vendados y quieres llegar al valle (el mínimo de la pérdida). El gradiente te dice la dirección de la pendiente más pronunciada, y das un paso en sentido contrario. El *learning rate* determina qué tan largo es cada paso.
+
+```{python}
+#| label: fig-gradient-descent
+#| fig-cap: "Descenso por gradiente: la bola 'rueda' hacia el mínimo de la función de pérdida dando pasos proporcionales al gradiente. Un learning rate demasiado grande salta sobre el mínimo; demasiado pequeño converge lentamente."
+#| fig-width: 12
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+def perdida(w):
+    return (w - 2)**2 + 0.5 * np.sin(4 * w) + 0.3
+
+w_vals = np.linspace(-1, 5, 400)
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 5))
+configs_gd = [
+    ('Learning rate apropiado\n(η = 0.3)', 0.3, '#4C72B0'),
+    ('Learning rate muy grande\n(η = 1.2)',  1.2, '#DD8452'),
+    ('Learning rate muy pequeño\n(η = 0.03)', 0.03, '#55A868'),
+]
+
+for ax, (titulo, lr, color) in zip(axes, configs_gd):
+    ax.plot(w_vals, perdida(w_vals), 'k-', lw=2, zorder=2)
+
+    w = -0.5
+    trayectoria_w = [w]
+    trayectoria_l = [perdida(w)]
+    for _ in range(12):
+        grad = 2 * (w - 2) + 2 * np.cos(4 * w)
+        w = w - lr * grad
+        w = np.clip(w, -1, 5)
+        trayectoria_w.append(w)
+        trayectoria_l.append(perdida(w))
+
+    ax.plot(trayectoria_w, trayectoria_l, 'o-', color=color,
+            markersize=6, lw=1.5, zorder=3, label='Pasos GD')
+    ax.plot(trayectoria_w[0], trayectoria_l[0], 's',
+            color='black', markersize=10, zorder=4, label='Inicio')
+    ax.plot(trayectoria_w[-1], trayectoria_l[-1], '*',
+            color='red', markersize=14, zorder=4, label='Final')
+
+    ax.set_title(titulo, fontsize=10.5)
+    ax.set_xlabel('Peso w', fontsize=10)
+    ax.set_ylabel('Pérdida 𝓛(w)', fontsize=10)
+    ax.legend(fontsize=8.5)
+    ax.grid(True, alpha=0.3)
+
+plt.suptitle('Efecto del Learning Rate en el Descenso por Gradiente', fontsize=13, y=1.01)
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-note}
+## Mini-batches: un truco práctico
+
+En la práctica, no se calcula el gradiente sobre todos los datos a la vez (demasiado lento) ni sobre un solo ejemplo (demasiado ruidoso). Se usa un **mini-batch**: un subconjunto aleatorio de 32, 64 o 128 ejemplos. Cada actualización de pesos es una estimación rápida y razonablemente buena del gradiente real. Una pasada completa sobre todos los mini-batches se llama **época** (*epoch*).
+:::
+
+---
+
+## El ciclo completo de entrenamiento
+
+El entrenamiento de una red neuronal repite el siguiente ciclo por cada época:
+
+1. **Forward pass**: pasar los datos por la red y obtener predicciones.
+2. **Calcular pérdida**: comparar predicciones con valores reales.
+3. **Backward pass (backprop)**: calcular gradientes de la pérdida respecto a cada peso.
+4. **Actualizar pesos**: dar un paso de gradient descent.
+5. **Repetir** hasta que la pérdida deje de mejorar.
+
+Veamos esto en acción con un ejemplo real:
+
+```{python}
+#| label: fig-entrenamiento-mlp
+#| fig-cap: "Entrenamiento de un MLP en datos de clasificación binaria. Izquierda: curva de pérdida en entrenamiento y validación (el modelo está aprendiendo). Derecha: frontera de decisión final del modelo."
+#| fig-width: 12
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.neural_network import MLPClassifier
+from sklearn.datasets import make_moons
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+
+X, y = make_moons(n_samples=400, noise=0.25, random_state=42)
+X = StandardScaler().fit_transform(X)
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.25, random_state=42)
+
+# Entrenar MLP guardando curvas de pérdida por época
+mlp = MLPClassifier(
+    hidden_layer_sizes=(32, 16),
+    activation='relu',
+    max_iter=1,
+    warm_start=True,
+    random_state=42,
+    learning_rate_init=0.01,
+)
+
+train_losses, val_losses = [], []
+n_epochs = 120
+
+for epoch in range(n_epochs):
+    mlp.fit(X_train, y_train)
+    train_losses.append(mlp.loss_)
+    # Pérdida de validación manual (log-loss)
+    from sklearn.metrics import log_loss
+    p_val = mlp.predict_proba(X_val)
+    val_losses.append(log_loss(y_val, p_val))
+
+# Gráfica
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# Curva de pérdida
+ax = axes[0]
+ax.plot(train_losses, label='Entrenamiento', color='#4C72B0', lw=2)
+ax.plot(val_losses,   label='Validación',    color='#DD8452', lw=2, ls='--')
+ax.set_xlabel('Época', fontsize=11)
+ax.set_ylabel('Pérdida (log-loss)', fontsize=11)
+ax.set_title('Curva de Aprendizaje', fontsize=12)
+ax.legend(fontsize=10)
+ax.grid(True, alpha=0.3)
+
+# Frontera de decisión
+ax = axes[1]
+h = 0.04
+x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+xx, yy = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min, y_max, h))
+Z = mlp.predict_proba(np.c_[xx.ravel(), yy.ravel()])[:, 1].reshape(xx.shape)
+ax.contourf(xx, yy, Z, levels=20, cmap='RdBu_r', alpha=0.7)
+ax.contour(xx, yy, Z, levels=[0.5], colors='black', lw=1.5)
+ax.scatter(X_val[:, 0], X_val[:, 1], c=y_val, cmap='RdBu_r',
+           edgecolors='black', s=40, zorder=3)
+ax.set_title('Frontera de Decisión (validación)', fontsize=12)
+ax.set_xlabel('X₁', fontsize=11)
+ax.set_ylabel('X₂', fontsize=11)
+ax.grid(True, alpha=0.3)
+
+acc = mlp.score(X_val, y_val)
+ax.text(0.05, 0.05, f'Accuracy: {acc:.1%}', transform=ax.transAxes,
+        fontsize=10, color='white',
+        bbox=dict(boxstyle='round', facecolor='#2c3e50', alpha=0.8))
+
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+## Evolución de la frontera de decisión durante el entrenamiento
+
+Una forma muy intuitiva de ver qué hace la red mientras aprende es observar cómo cambia su frontera de decisión a lo largo de las épocas:
+
+```{python}
+#| label: fig-evolucion-frontera
+#| fig-cap: "La red empieza con una frontera casi aleatoria (época 1) y la refina progresivamente hasta separar bien las dos clases."
+#| fig-width: 13
+#| fig-height: 4
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.neural_network import MLPClassifier
+from sklearn.datasets import make_moons
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+X, y = make_moons(n_samples=300, noise=0.25, random_state=42)
+X = StandardScaler().fit_transform(X)
+
+epocas_mostrar = [1, 5, 20, 100]
+fig, axes = plt.subplots(1, 4, figsize=(13, 4))
+
+h = 0.05
+x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+xx, yy = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min, y_max, h))
+
+mlp = MLPClassifier(hidden_layer_sizes=(32, 16), activation='relu',
+                    max_iter=1, warm_start=True, random_state=42,
+                    learning_rate_init=0.01)
+
+ep_actual = 0
+ep_idx = 0
+
+for ep in range(1, max(epocas_mostrar) + 1):
+    mlp.fit(X, y)
+    if ep in epocas_mostrar:
+        ax = axes[ep_idx]
+        Z = mlp.predict_proba(np.c_[xx.ravel(), yy.ravel()])[:, 1].reshape(xx.shape)
+        ax.contourf(xx, yy, Z, levels=20, cmap='RdBu_r', alpha=0.7)
+        ax.contour(xx, yy, Z, levels=[0.5], colors='black', lw=1.2)
+        ax.scatter(X[:, 0], X[:, 1], c=y, cmap='RdBu_r', edgecolors='black', s=20, zorder=3)
+        acc = mlp.score(X, y)
+        ax.set_title(f'Época {ep}\nAcc: {acc:.0%}', fontsize=11)
+        ax.axis('off')
+        ep_idx += 1
+
+plt.suptitle('Evolución de la Frontera de Decisión', fontsize=13, y=1.01)
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+## Arquitecturas comunes para detección de patrones
+
+El MLP es la arquitectura más general, pero la práctica ha demostrado que diseñar la arquitectura según la estructura del problema produce modelos mucho más eficientes. Dos arquitecturas especializadas dominan el aprendizaje no supervisado y el procesamiento de imágenes.
+
+---
+
+### Autoencoders
+
+Un **autoencoder** es una red entrenada para reconstruir su propia entrada. El truco está en forzar que la información pase por un **cuello de botella** (espacio latente) de menor dimensión que la entrada. Para reconstruir bien la salida, la red debe aprender una representación comprimida que capture lo esencial.
+
+| Parte | Función |
+|-------|---------|
+| **Encoder** | Comprime la entrada hacia el espacio latente |
+| **Espacio latente** | Representación compacta aprendida |
+| **Decoder** | Reconstruye la entrada desde el espacio latente |
+
+La pérdida es el **error de reconstrucción** — qué tan diferente es la salida de la entrada. No se necesitan etiquetas: es aprendizaje **no supervisado**.
+
+```{python}
+#| label: fig-autoencoder-arquitectura
+#| fig-cap: "Arquitectura de un autoencoder: el encoder comprime la entrada hasta el cuello de botella y el decoder la reconstruye. El cuello de botella fuerza a la red a aprender solo lo esencial."
+#| fig-width: 11
+#| fig-height: 4.5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+fig, ax = plt.subplots(figsize=(11, 4.5))
+ax.set_xlim(0, 11)
+ax.set_ylim(0, 6)
+ax.axis('off')
+
+capas = [
+    (1.0,  4.0, '#55A868', 'Entrada\n(64 dim)'),
+    (2.9,  2.6, '#4C72B0', 'Encoder\n(32)'),
+    (4.8,  1.0, '#c0392b', 'Latente\n(2 dim)'),
+    (6.7,  2.6, '#4C72B0', 'Decoder\n(32)'),
+    (8.6,  4.0, '#DD8452', 'Salida\n(64 dim)'),
+]
+
+for x, h, color, label in capas:
+    rect = mpatches.FancyBboxPatch((x - 0.55, 3 - h/2), 1.1, h,
+                                    boxstyle='round,pad=0.05',
+                                    facecolor=color, edgecolor='white',
+                                    linewidth=1.5, zorder=3, alpha=0.9)
+    ax.add_patch(rect)
+    ax.text(x, 3, label, ha='center', va='center', fontsize=9.5,
+            color='white', fontweight='bold', zorder=4)
+
+xs = [c[0] for c in capas]
+for i in range(len(xs) - 1):
+    ax.annotate('', xy=(xs[i+1] - 0.57, 3), xytext=(xs[i] + 0.57, 3),
+                arrowprops=dict(arrowstyle='->', color='#555555', lw=1.8))
+
+ax.annotate('', xy=(4.8, 0.7), xytext=(1.0, 0.7),
+            arrowprops=dict(arrowstyle='<->', color='#4C72B0', lw=1.5))
+ax.text(2.9, 0.3, 'Encoder', ha='center', fontsize=10, color='#4C72B0', fontweight='bold')
+
+ax.annotate('', xy=(8.6, 0.7), xytext=(4.8, 0.7),
+            arrowprops=dict(arrowstyle='<->', color='#4C72B0', lw=1.5))
+ax.text(6.7, 0.3, 'Decoder', ha='center', fontsize=10, color='#4C72B0', fontweight='bold')
+
+ax.text(4.8, 5.6, '↓ Cuello de botella', ha='center', fontsize=10,
+        color='#c0392b', fontweight='bold')
+
+ax.set_title('Arquitectura de un Autoencoder', fontsize=13, pad=8)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: fig-autoencoder-demo
+#| fig-cap: "Autoencoder entrenado sobre dígitos escritos a mano (8×8 píxeles). Izquierda: comparación entre originales y sus reconstrucciones. Centro: espacio latente 2D — cada punto es un dígito comprimido a dos números. Derecha: error de reconstrucción por clase."
+#| fig-width: 14
+#| fig-height: 4.5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import load_digits
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import MinMaxScaler
+
+np.random.seed(42)
+digits = load_digits()
+X = MinMaxScaler().fit_transform(digits.data)  # 1797 x 64
+
+# Autoencoder: target = input, cuello de botella en 2D
+# Arquitectura: 64 → 32 → 2 → 32 → 64
+ae = MLPRegressor(
+    hidden_layer_sizes=(32, 2, 32),
+    activation='tanh',
+    solver='adam',
+    max_iter=600,
+    random_state=42,
+    learning_rate_init=0.001,
+)
+ae.fit(X, X)
+X_rec = ae.predict(X)
+
+# Espacio latente 2D: forward manual hasta el cuello de botella
+W1, b1 = ae.coefs_[0], ae.intercepts_[0]  # 64 → 32
+W2, b2 = ae.coefs_[1], ae.intercepts_[1]  # 32 → 2
+h1 = np.tanh(X @ W1 + b1)
+latente = np.tanh(h1 @ W2 + b2)
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+colores = plt.cm.tab10(np.arange(10) / 10)
+
+# Panel 1: originales vs reconstruidas (dígitos 0-4)
+ax = axes[0]
+filas = []
+for parte in (X, X_rec):
+    fila = [parte[np.where(digits.target == d)[0][0]].reshape(8, 8) for d in range(5)]
+    filas.append(np.concatenate(fila, axis=1))
+grid = np.concatenate(filas, axis=0)
+ax.imshow(grid, cmap='gray_r', vmin=0, vmax=1)
+ax.axhline(7.5, color='#c0392b', lw=1.5, ls='--')
+for d in range(5):
+    ax.text(d * 8 + 4, -1.5, str(d), ha='center', fontsize=10, fontweight='bold')
+ax.text(-2.5, 4,   'Original',     va='center', rotation=90, fontsize=9, color='#333')
+ax.text(-2.5, 12,  'Reconstruida', va='center', rotation=90, fontsize=9, color='#c0392b')
+ax.set_title('Original vs Reconstruida', fontsize=11)
+ax.axis('off')
+
+# Panel 2: espacio latente 2D
+ax = axes[1]
+for d in range(10):
+    mask = digits.target == d
+    ax.scatter(latente[mask, 0], latente[mask, 1], s=12, alpha=0.6,
+               color=colores[d], label=str(d))
+ax.set_title('Espacio latente 2D\n(cuello de botella = 2 neuronas)', fontsize=10)
+ax.set_xlabel('Dimensión 1', fontsize=10)
+ax.set_ylabel('Dimensión 2', fontsize=10)
+ax.legend(title='Dígito', fontsize=7.5, ncol=2, loc='best')
+ax.grid(True, alpha=0.3)
+
+# Panel 3: MSE por clase
+ax = axes[2]
+mse_por_clase = [
+    np.mean((X[digits.target == d] - X_rec[digits.target == d])**2)
+    for d in range(10)
+]
+ax.bar(range(10), mse_por_clase, color=colores)
+ax.set_xlabel('Dígito', fontsize=10)
+ax.set_ylabel('MSE de reconstrucción', fontsize=10)
+ax.set_title('Error de reconstrucción por clase', fontsize=11)
+ax.set_xticks(range(10))
+ax.grid(True, alpha=0.3, axis='y')
+
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-note}
+## Usos principales de los autoencoders
+
+- **Reducción de dimensionalidad no lineal**: el espacio latente es como un PCA no lineal — captura relaciones curvilíneas que PCA no puede.
+- **Detección de anomalías**: si un dato tiene error de reconstrucción muy alto, es probable que sea inusual; el modelo no "sabe" cómo comprimirlo porque no lo vio en entrenamiento.
+- **Denoising**: entrenando con entrada ruidosa y salida limpia, la red aprende a filtrar el ruido.
+:::
+
+---
+
+### Redes Convolucionales (CNN)
+
+Un MLP trata cada píxel de una imagen como una variable independiente. El problema: **ignora completamente la estructura espacial**. Si desplazas un objeto 10 píxeles a la derecha, el MLP lo ve como una imagen completamente diferente.
+
+Las **Redes Convolucionales** (*Convolutional Neural Networks*, CNN) resuelven esto con dos ideas:
+
+1. **Conectividad local**: cada neurona solo ve una pequeña región de la imagen (su *campo receptivo*), no todos los píxeles.
+2. **Compartición de pesos**: el mismo filtro se aplica en todas las posiciones de la imagen. Un filtro que detecta bordes lo hace en cualquier lugar, no solo en una esquina fija.
+
+#### La operación de convolución
+
+Un **filtro** (*kernel*) es una pequeña matriz de pesos que se desliza sobre la imagen. En cada posición realiza una multiplicación elemento a elemento y suma el resultado: eso produce un **mapa de características** (*feature map*).
+
+```{python}
+#| label: fig-convolucion
+#| fig-cap: "Tres filtros 3×3 aplicados a un dígito escrito a mano. Cada filtro detecta un tipo distinto de patrón: bordes horizontales, verticales o texturas. En una CNN, estos pesos se aprenden automáticamente."
+#| fig-width: 13
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import convolve2d
+from sklearn.datasets import load_digits
+
+digits = load_digits()
+img = digits.images[0].astype(float)  # dígito '0', 8×8
+
+filtros = {
+    'Bordes\nhorizontales': np.array([[-1,-1,-1],[0,0,0],[1,1,1]], dtype=float),
+    'Bordes\nverticales':   np.array([[-1,0,1],[-1,0,1],[-1,0,1]], dtype=float),
+    'Realce':               np.array([[0,-1,0],[-1,5,-1],[0,-1,0]], dtype=float),
+}
+
+fig, axes = plt.subplots(2, 4, figsize=(13, 5))
+
+axes[0, 0].imshow(img, cmap='gray_r')
+axes[0, 0].set_title('Imagen original\n(8×8 píxeles)', fontsize=10)
+axes[0, 0].axis('off')
+axes[1, 0].text(0.5, 0.5, 'Imagen\nde entrada', ha='center', va='center',
+                fontsize=10, transform=axes[1, 0].transAxes, color='#444')
+axes[1, 0].axis('off')
+
+for i, (nombre, filtro) in enumerate(filtros.items()):
+    fm = convolve2d(img, filtro, mode='same')
+
+    axes[0, i+1].imshow(fm, cmap='RdBu_r')
+    axes[0, i+1].set_title(f'Mapa de características\n{nombre}', fontsize=9.5)
+    axes[0, i+1].axis('off')
+
+    axes[1, i+1].imshow(filtro, cmap='RdBu_r', vmin=-2, vmax=2)
+    axes[1, i+1].set_title('Filtro 3×3', fontsize=9.5)
+    for ii in range(3):
+        for jj in range(3):
+            val = int(filtro[ii, jj])
+            axes[1, i+1].text(jj, ii, f'{val:+d}', ha='center', va='center',
+                              fontsize=12, fontweight='bold',
+                              color='white' if abs(val) > 1 else 'black')
+    axes[1, i+1].axis('off')
+
+plt.suptitle('Convolución: el mismo filtro se desliza sobre toda la imagen', fontsize=12, y=1.01)
+plt.tight_layout()
+plt.show()
+```
+
+#### Pooling: reducir sin perder lo importante
+
+Después de cada convolución, el mapa de características puede ser grande. El **pooling** lo reduce tomando un resumen de cada región pequeña. El más común es el **max pooling**: de cada ventana de 2×2 píxeles, conserva solo el valor máximo.
+
+```{python}
+#| label: fig-maxpooling
+#| fig-cap: "Max pooling 2×2 con stride 2: cada región de 2×2 se reduce a su valor máximo, reduciendo el mapa a la mitad en cada dimensión. Esto hace la representación más compacta e invariante a pequeñas traslaciones."
+#| fig-width: 10
+#| fig-height: 4
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(3)
+entrada = np.array([
+    [1, 3, 2, 4],
+    [5, 6, 1, 2],
+    [3, 2, 7, 8],
+    [1, 4, 6, 3],
+], dtype=float)
+
+# Max pooling 2x2
+salida = np.array([
+    [max(entrada[r:r+2, c:c+2].ravel()) for c in range(0, 4, 2)]
+    for r in range(0, 4, 2)
+], dtype=float)
+
+fig, axes = plt.subplots(1, 3, figsize=(10, 4), gridspec_kw={'width_ratios': [4, 1, 2]})
+
+# Mapa de entrada con cuadrantes coloreados
+ax = axes[0]
+colores_region = ['#d5e8f5', '#fde8d5', '#d5f5e3', '#f5d5e8']
+regiones = [(0,0),(0,2),(2,0),(2,2)]
+for k, (r0, c0) in enumerate(regiones):
+    for dr in range(2):
+        for dc in range(2):
+            ax.add_patch(plt.Rectangle((c0+dc-0.5, r0+dr-0.5), 1, 1,
+                         facecolor=colores_region[k], edgecolor='white', lw=2, zorder=1))
+            val = int(entrada[r0+dr, c0+dc])
+            es_max = (entrada[r0+dr, c0+dc] == salida[r0//2, c0//2])
+            ax.text(c0+dc, r0+dr, str(val), ha='center', va='center',
+                    fontsize=14, fontweight='bold' if es_max else 'normal',
+                    color='#c0392b' if es_max else '#444', zorder=3)
+
+ax.set_xlim(-0.5, 3.5)
+ax.set_ylim(3.5, -0.5)
+ax.set_xticks([])
+ax.set_yticks([])
+ax.set_title('Entrada (4×4)', fontsize=11)
+for spine in ax.spines.values():
+    spine.set_visible(False)
+
+# Flecha
+ax = axes[1]
+ax.axis('off')
+ax.annotate('', xy=(0.9, 0.5), xytext=(0.1, 0.5),
+            xycoords='axes fraction',
+            arrowprops=dict(arrowstyle='->', color='#555', lw=2.5))
+ax.text(0.5, 0.65, 'Max\nPooling\n2×2', ha='center', va='bottom',
+        fontsize=9, transform=ax.transAxes, color='#555')
+
+# Mapa de salida
+ax = axes[2]
+for k, (r0, c0) in enumerate(regiones):
+    r_out, c_out = r0//2, c0//2
+    ax.add_patch(plt.Rectangle((c_out-0.5, r_out-0.5), 1, 1,
+                 facecolor=colores_region[k], edgecolor='white', lw=2, zorder=1))
+    ax.text(c_out, r_out, str(int(salida[r_out, c_out])), ha='center', va='center',
+            fontsize=14, fontweight='bold', color='#c0392b', zorder=3)
+
+ax.set_xlim(-0.5, 1.5)
+ax.set_ylim(1.5, -0.5)
+ax.set_xticks([])
+ax.set_yticks([])
+ax.set_title('Salida (2×2)\nvalor máximo de cada región', fontsize=11)
+for spine in ax.spines.values():
+    spine.set_visible(False)
+
+plt.suptitle('Max Pooling: reducción de dimensión preservando lo más activo', fontsize=12, y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+El pooling tiene dos efectos: reduce el tamaño del mapa (menos cómputo y parámetros en capas siguientes) y aporta **invarianza a pequeñas traslaciones** — si el patrón se mueve un píxel, el máximo de la región probablemente no cambia.
+
+#### Arquitectura de una CNN
+
+Una CNN típica apila bloques de **convolución + ReLU + pooling** que van extrayendo características cada vez más abstractas, seguidos de capas densas para la clasificación final.
+
+```{python}
+#| label: fig-cnn-arquitectura
+#| fig-cap: "Arquitectura típica de una CNN: bloques de convolución + pooling que reducen el espacio espacial mientras aumentan el número de mapas de características, seguidos de capas densas para clasificación."
+#| fig-width: 13
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+fig, ax = plt.subplots(figsize=(13, 5))
+ax.set_xlim(0, 13)
+ax.set_ylim(0, 6)
+ax.axis('off')
+
+bloques = [
+    (0.9,  3.2, 2.4, '#55A868', 'Entrada\n28×28×1'),
+    (3.0,  2.8, 2.0, '#4C72B0', 'Conv + ReLU\n26×26×32'),
+    (5.0,  2.2, 1.5, '#4C72B0', 'Max Pooling\n13×13×32'),
+    (6.9,  1.8, 1.2, '#9b59b6', 'Conv + ReLU\n11×11×64'),
+    (8.6,  1.4, 0.9, '#9b59b6', 'Max Pooling\n5×5×64'),
+    (10.1, 1.1, 0.7, '#c0392b', 'Flatten\n1600'),
+    (11.5, 1.0, 0.6, '#DD8452', 'Dense\nSoftmax\n10 clases'),
+]
+
+for x, w, h, color, label in bloques:
+    rect = mpatches.FancyBboxPatch((x - w/2, 3 - h/2), w, h,
+                                    boxstyle='round,pad=0.07',
+                                    facecolor=color, edgecolor='white',
+                                    linewidth=1.5, zorder=3, alpha=0.9)
+    ax.add_patch(rect)
+    ax.text(x, 3, label, ha='center', va='center', fontsize=8.5,
+            color='white', fontweight='bold', zorder=4)
+
+xs = [b[0] for b in bloques]
+ws = [b[1] for b in bloques]
+for i in range(len(xs) - 1):
+    ax.annotate('', xy=(xs[i+1] - ws[i+1]/2, 3), xytext=(xs[i] + ws[i]/2, 3),
+                arrowprops=dict(arrowstyle='->', color='#555555', lw=1.6))
+
+ax.annotate('', xy=(9.3, 0.8), xytext=(1.8, 0.8),
+            arrowprops=dict(arrowstyle='<->', color='#4C72B0', lw=1.5))
+ax.text(5.5, 0.4, 'Extracción de características (convoluciones + pooling)',
+        ha='center', fontsize=9.5, color='#4C72B0', fontweight='bold')
+
+ax.annotate('', xy=(12.1, 0.8), xytext=(9.8, 0.8),
+            arrowprops=dict(arrowstyle='<->', color='#DD8452', lw=1.5))
+ax.text(11.0, 0.4, 'Clasificación',
+        ha='center', fontsize=9.5, color='#DD8452', fontweight='bold')
+
+ax.set_title('Arquitectura de una Red Convolucional (CNN)', fontsize=13, pad=8)
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-note}
+## Por qué las CNN dominan en imágenes
+
+- **Invarianza traslacional**: el mismo filtro detecta un patrón sin importar dónde aparezca en la imagen.
+- **Jerarquía de características**: capas tempranas detectan bordes → capas medias detectan formas → capas profundas detectan objetos completos.
+- **Eficiencia paramétrica**: un filtro 3×3 tiene solo 9 pesos, sin importar el tamaño de la imagen. Un MLP equivalente sobre una imagen de 224×224 necesitaría millones de parámetros en la primera capa.
+:::
+
+---
+
+## Resumen conceptual
+
+| Concepto | Qué es | Analogía |
+|----------|--------|----------|
+| **Perceptrón** | Unidad básica: combina entradas con pesos y aplica una activación | Neurona biológica |
+| **Capa oculta** | Conjunto de perceptrones que aprenden representaciones intermedias | Capas de abstracción |
+| **Forward propagation** | Cálculo de la predicción pasando datos hacia adelante | Responder un examen |
+| **Función de pérdida** | Mide qué tan mala es la predicción | Calificación del examen |
+| **Backpropagation** | Calcula qué tan "culpable" es cada peso del error | Revisar qué falló y por qué |
+| **Gradient descent** | Ajusta los pesos para reducir el error | Estudiar los temas donde fallaste |
+| **Learning rate** | Controla el tamaño del ajuste | Qué tan agresivamente cambias tu estrategia |
+| **Época** | Una pasada completa sobre todos los datos de entrenamiento | Un ciclo de estudio |
+
+::: {.callout-note}
+## ¿Cuándo usar redes neuronales en proyectos de negocio?
+
+Las redes neuronales brillan cuando:
+
+- **Los datos no son tabulares**: imágenes, audio, texto, series de tiempo largas.
+- **Tienes muchos datos**: necesitan miles de ejemplos para generalizar bien.
+- **Puedes permitirte tiempo de entrenamiento**: son más lentas que boosting.
+
+Para la mayoría de los proyectos de negocio con datos tabulares y cientos/miles de registros, **XGBoost o LightGBM seguirán siendo tu primera opción**. Las redes neuronales son la herramienta correcta cuando la complejidad del problema y la escala de los datos lo justifican.
+:::
