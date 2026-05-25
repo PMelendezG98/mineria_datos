@@ -1102,6 +1102,470 @@ plt.show()
 
 ---
 
+## Mecanismo de Atención
+
+Las CNN y los MLP tienen un límite: **tratan todas las posiciones igual**. Para texto y series de tiempo, lo que importa es que ciertas palabras o pasos temporales son más relevantes entre sí que otros. El mecanismo de atención resuelve esto: aprende a asignar pesos dinámicos a cada parte de la entrada según el contexto.
+
+La idea central: para producir la representación de un elemento, la red **pregunta** (Query) a todos los demás si son relevantes. Cada elemento ofrece una **llave** (Key) para ser comparado y un **valor** (Value) con su contenido. La similitud Query–Key determina cuánto se toma de cada Value.
+
+$$\text{Atención}(Q, K, V) = \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V$$
+
+```{python}
+#| label: fig-atencion-mecanismo
+#| fig-cap: "Mecanismo de atención: la Query de cada palabra se compara con las Keys de todas las demás. Los pesos de atención (colores) determinan cuánto de cada Value se incorpora a la representación final."
+#| fig-width: 13
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+np.random.seed(0)
+
+palabras = ['El', 'banco', 'del', 'río', 'está', 'lleno']
+n = len(palabras)
+
+# Pesos de atención simulados: "banco" presta más atención a "río" que a "lleno"
+atencion = np.array([
+    [0.50, 0.15, 0.10, 0.10, 0.10, 0.05],
+    [0.08, 0.30, 0.08, 0.38, 0.10, 0.06],  # "banco" → mira "río"
+    [0.10, 0.10, 0.45, 0.15, 0.10, 0.10],
+    [0.05, 0.35, 0.10, 0.35, 0.10, 0.05],
+    [0.10, 0.10, 0.10, 0.10, 0.45, 0.15],
+    [0.05, 0.10, 0.10, 0.10, 0.25, 0.40],
+])
+atencion = atencion / atencion.sum(axis=1, keepdims=True)
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+# Panel 1: mapa de calor de atención
+ax = axes[0]
+im = ax.imshow(atencion, cmap='Blues', vmin=0, vmax=0.55)
+ax.set_xticks(range(n)); ax.set_xticklabels(palabras, fontsize=11)
+ax.set_yticks(range(n)); ax.set_yticklabels(palabras, fontsize=11)
+ax.set_xlabel('Keys (¿a quién miro?)', fontsize=11)
+ax.set_ylabel('Queries (¿quién pregunta?)', fontsize=11)
+ax.set_title('Mapa de pesos de atención', fontsize=12)
+for i in range(n):
+    for j in range(n):
+        ax.text(j, i, f'{atencion[i,j]:.2f}', ha='center', va='center',
+                fontsize=8.5, color='white' if atencion[i,j] > 0.3 else '#333')
+plt.colorbar(im, ax=ax, shrink=0.8)
+
+# Panel 2: diagrama Q-K-V para la palabra "banco"
+ax = axes[1]
+ax.set_xlim(0, 10); ax.set_ylim(0, 7); ax.axis('off')
+ax.set_title('Atención para la palabra "banco"', fontsize=12)
+
+colores_kv = plt.cm.Blues(np.linspace(0.25, 0.85, n))
+
+# Query box
+rect_q = mpatches.FancyBboxPatch((0.3, 3.0), 1.6, 0.8,
+    boxstyle='round,pad=0.1', facecolor='#DD8452', edgecolor='white', lw=1.5, zorder=3)
+ax.add_patch(rect_q)
+ax.text(1.1, 3.4, 'Q: "banco"', ha='center', va='center',
+        fontsize=10, color='white', fontweight='bold', zorder=4)
+
+for i, (pal, peso, c) in enumerate(zip(palabras, atencion[1], colores_kv)):
+    y = 6.2 - i * 0.95
+
+    # Key box
+    rect_k = mpatches.FancyBboxPatch((3.2, y - 0.3), 1.5, 0.65,
+        boxstyle='round,pad=0.05', facecolor=c, edgecolor='white', lw=1, zorder=3)
+    ax.add_patch(rect_k)
+    ax.text(3.95, y + 0.02, f'K: "{pal}"', ha='center', va='center',
+            fontsize=9, color='white' if peso > 0.2 else '#333', fontweight='bold', zorder=4)
+
+    # Value box
+    rect_v = mpatches.FancyBboxPatch((6.0, y - 0.3), 1.5, 0.65,
+        boxstyle='round,pad=0.05', facecolor=c, edgecolor='white', lw=1, alpha=0.7, zorder=3)
+    ax.add_patch(rect_v)
+    ax.text(6.75, y + 0.02, f'V · {peso:.2f}', ha='center', va='center',
+            fontsize=9, color='#333', zorder=4)
+
+    # Flecha Q → K (ancho proporcional al peso)
+    ax.annotate('', xy=(3.18, y + 0.02), xytext=(1.92, 3.4),
+                arrowprops=dict(arrowstyle='->', color='#DD8452',
+                                lw=0.8 + peso * 6, alpha=0.5 + peso))
+
+ax.text(3.95, 0.4, 'Keys', ha='center', fontsize=10, color='#4C72B0', fontweight='bold')
+ax.text(6.75, 0.4, 'Values × peso', ha='center', fontsize=10, color='#4C72B0', fontweight='bold')
+
+# Salida
+rect_out = mpatches.FancyBboxPatch((8.1, 3.0), 1.5, 0.8,
+    boxstyle='round,pad=0.1', facecolor='#55A868', edgecolor='white', lw=1.5, zorder=3)
+ax.add_patch(rect_out)
+ax.text(8.85, 3.4, 'Salida\n"banco"', ha='center', va='center',
+        fontsize=9, color='white', fontweight='bold', zorder=4)
+ax.annotate('', xy=(8.08, 3.4), xytext=(7.52, 3.4),
+            arrowprops=dict(arrowstyle='->', color='#555', lw=2.0))
+ax.text(7.75, 3.7, 'Σ', fontsize=14, ha='center', color='#555')
+
+plt.tight_layout()
+plt.show()
+```
+
+### Atención Multi-Cabeza
+
+En la práctica, no se usa una sola función de atención sino varias en paralelo (**cabezas**). Cada cabeza aprende a enfocarse en un tipo diferente de relación: una puede capturar dependencias sintácticas, otra semánticas, otra de posición.
+
+```{python}
+#| label: fig-multihead-atencion
+#| fig-cap: "Atención multi-cabeza: H cabezas atienden a distintos patrones en paralelo. Sus salidas se concatenan y proyectan. Cada cabeza puede especializarse en un tipo de relación diferente."
+#| fig-width: 13
+#| fig-height: 5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+np.random.seed(1)
+
+palabras = ['El', 'banco', 'del', 'río', 'fluye', 'rápido']
+n = len(palabras)
+
+fig, axes = plt.subplots(1, 3, figsize=(13, 5))
+titulos = [
+    'Cabeza 1\n(relaciones sintácticas)',
+    'Cabeza 2\n(semántica / tema)',
+    'Cabeza 3\n(posición local)',
+]
+cmaps = ['Blues', 'Oranges', 'Greens']
+
+atencion_heads = [
+    # Cabeza 1: estructura gramatical
+    np.array([
+        [0.6, 0.1, 0.1, 0.05, 0.1, 0.05],
+        [0.1, 0.5, 0.2, 0.1,  0.05, 0.05],
+        [0.1, 0.1, 0.5, 0.2,  0.05, 0.05],
+        [0.05, 0.1, 0.2, 0.5, 0.1,  0.05],
+        [0.05, 0.05, 0.05, 0.15, 0.6, 0.1],
+        [0.05, 0.05, 0.05, 0.05, 0.2, 0.6],
+    ]),
+    # Cabeza 2: semántica — banco y río se activan mutuamente
+    np.array([
+        [0.3, 0.15, 0.1, 0.15, 0.2, 0.1],
+        [0.1, 0.25, 0.05, 0.45, 0.1, 0.05],
+        [0.1, 0.05, 0.4, 0.3,  0.1, 0.05],
+        [0.05, 0.4, 0.15, 0.25, 0.1, 0.05],
+        [0.1, 0.1, 0.1, 0.1, 0.35, 0.25],
+        [0.05, 0.05, 0.05, 0.05, 0.3, 0.5],
+    ]),
+    # Cabeza 3: local — cada token mira a sus vecinos
+    np.array([
+        [0.5, 0.4, 0.05, 0.02, 0.02, 0.01],
+        [0.35, 0.35, 0.2, 0.05, 0.03, 0.02],
+        [0.05, 0.3, 0.35, 0.25, 0.03, 0.02],
+        [0.02, 0.05, 0.25, 0.4, 0.25, 0.03],
+        [0.02, 0.03, 0.03, 0.25, 0.4, 0.27],
+        [0.01, 0.02, 0.02, 0.03, 0.32, 0.6],
+    ]),
+]
+
+for ax, A, titulo, cmap in zip(axes, atencion_heads, titulos, cmaps):
+    A = A / A.sum(axis=1, keepdims=True)
+    im = ax.imshow(A, cmap=cmap, vmin=0, vmax=0.6)
+    ax.set_xticks(range(n)); ax.set_xticklabels(palabras, fontsize=9, rotation=30, ha='right')
+    ax.set_yticks(range(n)); ax.set_yticklabels(palabras, fontsize=9)
+    ax.set_title(titulo, fontsize=11)
+    for i in range(n):
+        for j in range(n):
+            ax.text(j, i, f'{A[i,j]:.2f}', ha='center', va='center',
+                    fontsize=7.5, color='white' if A[i,j] > 0.35 else '#333')
+    plt.colorbar(im, ax=ax, shrink=0.75)
+
+plt.suptitle('Atención Multi-Cabeza: cada cabeza aprende patrones distintos', fontsize=13, y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+## El Transformer
+
+El **Transformer** es la arquitectura que cambió el campo: GPT, BERT, LLaMA y todos los grandes modelos de lenguaje son Transformers. Su ventaja frente a las arquitecturas recurrentes (LSTM, GRU) es que **procesa toda la secuencia en paralelo** usando solo atención.
+
+### Codificación posicional
+
+La atención no tiene noción de orden: "El banco del río" y "río del banco El" producirían los mismos pesos. Para dar al modelo sentido de posición se suman **embeddings posicionales** a los embeddings de entrada:
+
+$$PE_{(pos, 2i)} = \sin\!\left(\frac{pos}{10000^{2i/d}}\right) \qquad PE_{(pos, 2i+1)} = \cos\!\left(\frac{pos}{10000^{2i/d}}\right)$$
+
+```{python}
+#| label: fig-positional-encoding
+#| fig-cap: "Codificación posicional sinusoidal: cada posición en la secuencia recibe un vector único formado por senos y cosenos de distintas frecuencias. El modelo puede inferir posición absoluta y distancia relativa entre tokens."
+#| fig-width: 12
+#| fig-height: 4.5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+def positional_encoding(max_len, d_model):
+    PE = np.zeros((max_len, d_model))
+    pos = np.arange(max_len)[:, None]
+    div = np.exp(np.arange(0, d_model, 2) * (-np.log(10000.0) / d_model))
+    PE[:, 0::2] = np.sin(pos * div)
+    PE[:, 1::2] = np.cos(pos * div)
+    return PE
+
+max_len, d_model = 60, 64
+PE = positional_encoding(max_len, d_model)
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+# Mapa de calor completo
+ax = axes[0]
+im = ax.imshow(PE.T, cmap='RdBu_r', aspect='auto', vmin=-1, vmax=1)
+ax.set_xlabel('Posición en la secuencia', fontsize=11)
+ax.set_ylabel('Dimensión del embedding', fontsize=11)
+ax.set_title('Matriz de codificación posicional\n(64 dimensiones, 60 posiciones)', fontsize=11)
+plt.colorbar(im, ax=ax, shrink=0.85)
+
+# Primeras dimensiones como señales
+ax = axes[1]
+dims = [0, 1, 4, 5, 16, 17]
+colores = plt.cm.tab10(np.linspace(0, 0.6, len(dims)))
+posiciones = np.arange(max_len)
+for dim, color in zip(dims, colores):
+    tipo = 'sin' if dim % 2 == 0 else 'cos'
+    ax.plot(posiciones, PE[:, dim], color=color, lw=2,
+            label=f'dim {dim} ({tipo})')
+ax.set_xlabel('Posición en la secuencia', fontsize=11)
+ax.set_ylabel('Valor PE', fontsize=11)
+ax.set_title('Señales posicionales por dimensión\n(frecuencias distintas = posiciones únicas)', fontsize=11)
+ax.legend(fontsize=8.5, ncol=2)
+ax.grid(True, alpha=0.3)
+ax.axhline(0, color='black', lw=0.7)
+
+plt.tight_layout()
+plt.show()
+```
+
+### Arquitectura completa del Transformer
+
+```{python}
+#| label: fig-transformer-arquitectura
+#| fig-cap: "Arquitectura completa del Transformer: bloque encoder (izquierda) y bloque decoder (derecha). El encoder procesa la entrada completa en paralelo; el decoder genera la salida token a token usando la representación del encoder vía cross-attention."
+#| fig-width: 13
+#| fig-height: 9
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+def bloque(ax, x, y, w, h, color, texto, fontsize=9.5, alpha=0.92):
+    rect = mpatches.FancyBboxPatch((x - w/2, y - h/2), w, h,
+        boxstyle='round,pad=0.08', facecolor=color,
+        edgecolor='white', linewidth=1.8, zorder=3, alpha=alpha)
+    ax.add_patch(rect)
+    ax.text(x, y, texto, ha='center', va='center', fontsize=fontsize,
+            color='white', fontweight='bold', zorder=4)
+
+def flecha(ax, x1, y1, x2, y2, color='#555', lw=1.8):
+    ax.annotate('', xy=(x2, y2), xytext=(x1, y1),
+                arrowprops=dict(arrowstyle='->', color=color, lw=lw))
+
+def add_norm(ax, x, y, label='Add & Norm'):
+    rect = mpatches.FancyBboxPatch((x - 1.1, y - 0.22), 2.2, 0.44,
+        boxstyle='round,pad=0.05', facecolor='#7f8c8d',
+        edgecolor='white', linewidth=1.2, zorder=3, alpha=0.85)
+    ax.add_patch(rect)
+    ax.text(x, y, label, ha='center', va='center', fontsize=8.5,
+            color='white', fontweight='bold', zorder=4)
+
+fig, ax = plt.subplots(figsize=(13, 9))
+ax.set_xlim(0, 13); ax.set_ylim(0, 10); ax.axis('off')
+
+# ── ENCODER (izquierda) ──────────────────────────────────────────
+EX = 3.2  # eje x del encoder
+
+# Input embedding + positional encoding
+bloque(ax, EX, 1.2, 2.2, 0.65, '#55A868', 'Input Embedding')
+bloque(ax, EX, 2.0, 2.2, 0.55, '#27ae60', '+ Pos. Encoding')
+flecha(ax, EX, 1.55, EX, 1.72)
+flecha(ax, EX, 2.28, EX, 2.6)
+
+# Multi-head self-attention
+bloque(ax, EX, 3.0, 2.2, 0.65, '#4C72B0', 'Multi-Head\nSelf-Attention', fontsize=9)
+add_norm(ax, EX, 3.88)
+flecha(ax, EX, 3.33, EX, 3.66)
+
+# Residual connection encoder bloque 1
+ax.annotate('', xy=(EX - 1.25, 3.88), xytext=(EX - 1.25, 2.65),
+            arrowprops=dict(arrowstyle='-', color='#aaa', lw=1.5))
+ax.plot([EX - 1.25, EX - 1.1], [3.88, 3.88], color='#aaa', lw=1.5)
+ax.text(EX - 1.6, 3.35, 'residual', fontsize=7.5, color='#aaa', rotation=90, va='center')
+
+flecha(ax, EX, 4.1, EX, 4.5)
+
+# Feed-forward
+bloque(ax, EX, 4.9, 2.2, 0.65, '#4C72B0', 'Feed-Forward\nNetwork', fontsize=9)
+add_norm(ax, EX, 5.78)
+flecha(ax, EX, 5.23, EX, 5.56)
+
+# Residual connection encoder bloque 2
+ax.annotate('', xy=(EX - 1.25, 5.78), xytext=(EX - 1.25, 4.55),
+            arrowprops=dict(arrowstyle='-', color='#aaa', lw=1.5))
+ax.plot([EX - 1.25, EX - 1.1], [5.78, 5.78], color='#aaa', lw=1.5)
+
+flecha(ax, EX, 6.0, EX, 6.4)
+
+# Salida del encoder
+bloque(ax, EX, 6.8, 2.2, 0.65, '#27ae60', 'Representación\nEncoder K, V', fontsize=9)
+
+# Etiqueta bloque encoder
+rect_enc = mpatches.FancyBboxPatch((EX - 1.5, 0.75), 3.0, 6.35,
+    boxstyle='round,pad=0.12', facecolor='none',
+    edgecolor='#27ae60', linewidth=2, linestyle='--', zorder=1)
+ax.add_patch(rect_enc)
+ax.text(EX, 0.4, 'ENCODER  ×N', ha='center', fontsize=11,
+        color='#27ae60', fontweight='bold')
+
+# ── DECODER (derecha) ────────────────────────────────────────────
+DX = 9.8
+
+bloque(ax, DX, 1.2, 2.2, 0.65, '#DD8452', 'Output Embedding\n(shifted right)', fontsize=8.5)
+bloque(ax, DX, 2.0, 2.2, 0.55, '#e67e22', '+ Pos. Encoding')
+flecha(ax, DX, 1.55, DX, 1.72)
+flecha(ax, DX, 2.28, DX, 2.6)
+
+# Masked self-attention
+bloque(ax, DX, 3.0, 2.2, 0.65, '#9b59b6', 'Masked\nSelf-Attention', fontsize=9)
+add_norm(ax, DX, 3.88)
+flecha(ax, DX, 3.33, DX, 3.66)
+
+ax.annotate('', xy=(DX - 1.25, 3.88), xytext=(DX - 1.25, 2.65),
+            arrowprops=dict(arrowstyle='-', color='#aaa', lw=1.5))
+ax.plot([DX - 1.25, DX - 1.1], [3.88, 3.88], color='#aaa', lw=1.5)
+
+flecha(ax, DX, 4.1, DX, 4.5)
+
+# Cross-attention — recibe K,V del encoder
+bloque(ax, DX, 4.9, 2.2, 0.65, '#c0392b', 'Cross-Attention\n(Q ← decoder\nK,V ← encoder)', fontsize=8)
+add_norm(ax, DX, 5.78)
+flecha(ax, DX, 5.23, DX, 5.56)
+
+ax.annotate('', xy=(DX - 1.25, 5.78), xytext=(DX - 1.25, 4.55),
+            arrowprops=dict(arrowstyle='-', color='#aaa', lw=1.5))
+ax.plot([DX - 1.25, DX - 1.1], [5.78, 5.78], color='#aaa', lw=1.5)
+
+# Flecha encoder → cross-attention
+ax.annotate('', xy=(DX - 1.12, 4.9), xytext=(EX + 1.12, 6.8),
+            arrowprops=dict(arrowstyle='->', color='#c0392b', lw=2.0,
+                            connectionstyle='arc3,rad=-0.15'))
+ax.text(6.5, 5.6, 'K, V', fontsize=10, color='#c0392b', fontweight='bold')
+
+flecha(ax, DX, 6.0, DX, 6.4)
+
+bloque(ax, DX, 4.9 + 2.0, 2.2, 0.65, '#9b59b6', 'Feed-Forward\nNetwork', fontsize=9)
+add_norm(ax, DX, 7.68)
+flecha(ax, DX, 5.23 + 2.0, DX, 5.56 + 2.0)
+
+ax.annotate('', xy=(DX - 1.25, 7.68), xytext=(DX - 1.25, 6.55),
+            arrowprops=dict(arrowstyle='-', color='#aaa', lw=1.5))
+ax.plot([DX - 1.25, DX - 1.1], [7.68, 7.68], color='#aaa', lw=1.5)
+
+flecha(ax, DX, 7.9, DX, 8.3)
+bloque(ax, DX, 8.7, 2.2, 0.65, '#e67e22', 'Linear + Softmax\n→ próximo token', fontsize=9)
+
+rect_dec = mpatches.FancyBboxPatch((DX - 1.5, 0.75), 3.0, 8.25,
+    boxstyle='round,pad=0.12', facecolor='none',
+    edgecolor='#DD8452', linewidth=2, linestyle='--', zorder=1)
+ax.add_patch(rect_dec)
+ax.text(DX, 0.4, 'DECODER  ×N', ha='center', fontsize=11,
+        color='#DD8452', fontweight='bold')
+
+ax.set_title('Arquitectura completa del Transformer\n(Vaswani et al., 2017 — "Attention is All You Need")',
+             fontsize=13, pad=10)
+plt.tight_layout()
+plt.show()
+```
+
+### Encoder-only vs Decoder-only
+
+En la práctica, la mayoría de los modelos modernos usan solo una parte del Transformer original:
+
+```{python}
+#| label: fig-transformer-variantes
+#| fig-cap: "Tres familias de Transformers según cómo usan la arquitectura original. Encoder-only (BERT): entiende texto. Decoder-only (GPT): genera texto. Encoder-decoder (T5, mBART): traduce o resume."
+#| fig-width: 13
+#| fig-height: 4.5
+#| echo: true
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+fig, axes = plt.subplots(1, 3, figsize=(13, 4.5))
+
+def draw_stack(ax, x_center, bloques_info, title, subtitle, color_borde):
+    y = 0.5
+    for texto, color, h in bloques_info:
+        rect = mpatches.FancyBboxPatch((x_center - 1.2, y), 2.4, h,
+            boxstyle='round,pad=0.07', facecolor=color,
+            edgecolor='white', linewidth=1.5, zorder=3, alpha=0.9)
+        ax.add_patch(rect)
+        ax.text(x_center, y + h/2, texto, ha='center', va='center',
+                fontsize=9, color='white', fontweight='bold', zorder=4)
+        y += h + 0.15
+    ax.set_xlim(0, 2 * x_center); ax.set_ylim(0, 5.5)
+    ax.axis('off')
+    ax.set_title(title, fontsize=12, color=color_borde, fontweight='bold')
+    ax.text(x_center, 0.1, subtitle, ha='center', fontsize=8.5, color='#555', style='italic')
+    rect_b = mpatches.FancyBboxPatch((x_center - 1.35, 0.35), 2.7, y - 0.2,
+        boxstyle='round,pad=0.1', facecolor='none',
+        edgecolor=color_borde, linewidth=2.0, linestyle='--', zorder=1)
+    ax.add_patch(rect_b)
+
+# Encoder-only
+draw_stack(axes[0], 1.5, [
+    ('Tokens de entrada', '#55A868', 0.55),
+    ('Embedding + PE',    '#27ae60', 0.5),
+    ('Self-Attention\n×12', '#4C72B0', 0.75),
+    ('Feed-Forward\n×12',   '#4C72B0', 0.75),
+    ('[CLS] → tarea',       '#c0392b', 0.6),
+], 'Encoder-only\n(BERT, RoBERTa)', 'Clasificación, NER, QA', '#4C72B0')
+
+# Decoder-only
+draw_stack(axes[1], 1.5, [
+    ('Tokens previos',         '#DD8452', 0.55),
+    ('Embedding + PE',         '#e67e22', 0.5),
+    ('Masked Self-Attn\n×96',  '#9b59b6', 0.75),
+    ('Feed-Forward\n×96',      '#9b59b6', 0.75),
+    ('→ siguiente token',      '#c0392b', 0.6),
+], 'Decoder-only\n(GPT, LLaMA)', 'Generación de texto', '#9b59b6')
+
+# Encoder-Decoder
+draw_stack(axes[2], 1.5, [
+    ('Input + Output',           '#55A868', 0.55),
+    ('Encoder ×N',               '#4C72B0', 0.55),
+    ('Cross-Attention',          '#c0392b', 0.5),
+    ('Decoder ×N',               '#9b59b6', 0.55),
+    ('→ secuencia generada',     '#DD8452', 0.55),
+], 'Encoder-Decoder\n(T5, mBART, Whisper)', 'Traducción, resumen, ASR', '#c0392b')
+
+plt.suptitle('Familias de Transformers: qué parte de la arquitectura usan',
+             fontsize=13, y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-note}
+## ¿Por qué el Transformer dominó todo?
+
+Tres ventajas clave sobre las redes recurrentes (LSTM):
+
+- **Paralelismo total**: procesa todos los tokens a la vez, no uno a uno. Permite escalar a miles de millones de parámetros.
+- **Contexto global de un solo paso**: cualquier token puede atender directamente a cualquier otro, sin importar la distancia. Las LSTM degradan con secuencias largas.
+- **Transferencia de aprendizaje**: un Transformer pre-entrenado en texto masivo se puede *fine-tunear* en cualquier tarea con pocos datos.
+:::
+
+---
+
 ## Resumen conceptual
 
 | Concepto | Qué es | Analogía |
@@ -1114,6 +1578,11 @@ plt.show()
 | **Gradient descent** | Ajusta los pesos para reducir el error | Estudiar los temas donde fallaste |
 | **Learning rate** | Controla el tamaño del ajuste | Qué tan agresivamente cambias tu estrategia |
 | **Época** | Una pasada completa sobre todos los datos de entrenamiento | Un ciclo de estudio |
+| **Atención** | Mecanismo que aprende qué partes de la entrada son relevantes entre sí | Subrayar las palabras clave al leer |
+| **Query / Key / Value** | Triplete que implementa la atención: pregunta, comparador y contenido | Búsqueda en un índice |
+| **Multi-cabeza** | Varias funciones de atención en paralelo, cada una especializada | Varios lectores con distintos criterios |
+| **Transformer** | Arquitectura basada solo en atención, sin recurrencia | Red paralela que "lee" toda la secuencia a la vez |
+| **Codificación posicional** | Vector que indica la posición de cada token en la secuencia | Numeración de páginas en un libro |
 
 ::: {.callout-note}
 ## ¿Cuándo usar redes neuronales en proyectos de negocio?
